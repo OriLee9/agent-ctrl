@@ -1,4 +1,4 @@
-# Agent Workflow Framework v3.0
+# Agent Workflow Framework
 
 > DAG-based multi-agent orchestration framework with real-time monitoring, review gates, and register-memory conversation compression.
 
@@ -149,14 +149,15 @@ Configurable limits: `max_iterations`, `budget_tokens`, `temperature`, `checkpoi
 
 Solves the long-context problem for multi-pass workflows:
 
-| Layer | Analogy | Content |
-|-------|---------|---------|
-| **Conversation** | CPU Register | System prompt + last 10 messages + archive reference |
-| **IMPLEMENTATION_SUMMARY.md** | L1 Cache | Structured checklist, file list, known issues |
-| **logs/round_N_conversation.json** | RAM | Full conversation archive per round |
-| **design.md** | Persistent Storage | Architecture specification |
+| Layer                                    | Analogy            | Content                                              |
+| ---------------------------------------- | ------------------ | ---------------------------------------------------- |
+| **Conversation**                   | CPU Register       | System prompt + last 10 messages + archive reference |
+| **IMPLEMENTATION_SUMMARY.md**      | L1 Cache           | Structured checklist, file list, known issues        |
+| **logs/round_N_conversation.json** | RAM                | Full conversation archive per round                  |
+| **design.md**                      | Persistent Storage | Architecture specification                           |
 
 After each rework pass:
+
 1. `archive_round()` — save full conversation to `logs/round_{N}_conversation.json`
 2. `compact()` — keep system prompt + last 10 messages, replace middle with `[History Archive]` reference
 
@@ -205,10 +206,10 @@ React-based frontend with:
 
 Pre-built multi-agent workflows:
 
-| Demo | Agents | Description |
-|------|--------|-------------|
-| **3D Racing Game** | architect → coder → reviewer | Babylon.js single-file arcade racing game with physics, HUD, lap system |
-| **Innovative Snake** | architect → coder → reviewer | HTML5 Canvas snake with warp mode, dash boost, power-ups, combo chains |
+| Demo                       | Agents                         | Description                                                             |
+| -------------------------- | ------------------------------ | ----------------------------------------------------------------------- |
+| **3D Racing Game**   | architect → coder → reviewer | Babylon.js single-file arcade racing game with physics, HUD, lap system |
+| **Innovative Snake** | architect → coder → reviewer | HTML5 Canvas snake with warp mode, dash boost, power-ups, combo chains  |
 
 ### 9. Human-in-the-Loop
 
@@ -293,22 +294,22 @@ agent-workflow/
 
 ## API Endpoints
 
-| Method | Path | Description |
-|--------|------|-------------|
-| GET | `/api/agents` | List all agents |
-| GET | `/api/agents/<id>` | Agent detail (messages, steps) |
-| GET | `/api/status` | System status |
-| GET | `/api/events` | **SSE** real-time event stream |
-| POST | `/api/intervene` | Submit intervention (pause/resume/abort/approve/reject) |
-| GET | `/api/workflow/tasks` | Workflow task list |
-| GET | `/api/workflow/progress` | Execution progress |
-| POST | `/api/workflow/pause` | Pause workflow |
-| POST | `/api/workflow/resume` | Resume workflow |
-| POST | `/api/workflow/abort` | Abort workflow |
-| POST | `/api/workflow/approve` | Approve pending task |
-| POST | `/api/workflow/reject` | Reject pending task |
-| GET | `/api/stats` | Token usage & event statistics |
-| GET | `/api/config` | Current configuration |
+| Method | Path                       | Description                                             |
+| ------ | -------------------------- | ------------------------------------------------------- |
+| GET    | `/api/agents`            | List all agents                                         |
+| GET    | `/api/agents/<id>`       | Agent detail (messages, steps)                          |
+| GET    | `/api/status`            | System status                                           |
+| GET    | `/api/events`            | **SSE** real-time event stream                    |
+| POST   | `/api/intervene`         | Submit intervention (pause/resume/abort/approve/reject) |
+| GET    | `/api/workflow/tasks`    | Workflow task list                                      |
+| GET    | `/api/workflow/progress` | Execution progress                                      |
+| POST   | `/api/workflow/pause`    | Pause workflow                                          |
+| POST   | `/api/workflow/resume`   | Resume workflow                                         |
+| POST   | `/api/workflow/abort`    | Abort workflow                                          |
+| POST   | `/api/workflow/approve`  | Approve pending task                                    |
+| POST   | `/api/workflow/reject`   | Reject pending task                                     |
+| GET    | `/api/stats`             | Token usage & event statistics                          |
+| GET    | `/api/config`            | Current configuration                                   |
 
 ---
 
