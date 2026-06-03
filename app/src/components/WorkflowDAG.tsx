@@ -17,6 +17,9 @@ import {
   AlertTriangle,
   Package,
   CircleDot,
+  ShieldCheck,
+  ShieldAlert,
+  RefreshCw,
 } from 'lucide-react';
 
 interface Props {
@@ -25,8 +28,13 @@ interface Props {
   /** 预览模式：只展示 DAG 结构，不展示执行状态 */
   preview?: boolean;
   /** 预览模式下传入的 tasks 和 edges */
-  previewTasks?: Array<{ name: string; agent_id: string; requires_approval?: boolean }>;
+  previewTasks?: Array<{ name: string; agent_id: string; requires_approval?: boolean; review_gate?: string | null; max_passes?: number }>;
   previewEdges?: Array<{ from: string; to: string }>;
+  /** Review gate edges: reviewer -> implement task */
+  reviewEdges?: Array<{ from: string; to: string }>;
+  /** Review results per task */
+  reviewResults?: Record<string, { approved: boolean; feedback: string; pass_num: number }>;
+
 }
 
 const stateConfig: Record<
@@ -145,11 +153,15 @@ function TaskNode({
   exec,
   onClick,
   isSelected,
+  isReviewer,
+  reviewResult,
 }: {
-  task: { name: string; agent_id: string; requires_approval: boolean };
+  task: { name: string; agent_id: string; requires_approval: boolean; review_gate?: string | null; max_passes?: number };
   exec: TaskExecutionState | undefined;
   onClick: () => void;
   isSelected: boolean;
+  isReviewer?: boolean;
+  reviewResult?: { approved: boolean; feedback: string; pass_num: number } | null;
 }) {
   const isPreview = !exec;
   const state = exec?.state || 'pending';
@@ -160,7 +172,7 @@ function TaskNode({
   return (
     <button
       onClick={onClick}
-      className={`relative flex flex-col items-start p-2.5 rounded-lg border transition-all w-[140px] text-left ${
+      className={`relative flex flex-col items-start p-2.5 rounded-lg border transition-all w-[150px] text-left ${
         isSelected ? 'ring-1 ring-cyan-400 ring-offset-1 ring-offset-slate-900' : ''
       } ${style.bg} ${style.border} hover:brightness-110`}
     >
@@ -173,6 +185,16 @@ function TaskNode({
         {task.requires_approval && (
           <span className="text-[10px] text-amber-400 shrink-0">*</span>
         )}
+        {isReviewer && (
+          <span className="text-[10px] text-purple-400 shrink-0 flex items-center gap-0.5" title="Reviewer">
+            <ShieldCheck className="w-3 h-3" />
+          </span>
+        )}
+        {task.review_gate && (
+          <span className="text-[10px] text-orange-400 shrink-0" title={`Reviewed by ${task.review_gate}`}>
+            R
+          </span>
+        )}
       </div>
       {exec && exec.elapsed > 0 && (
         <div className="text-[10px] text-slate-500 mt-0.5">{formatTime(exec.elapsed)}</div>
@@ -184,6 +206,24 @@ function TaskNode({
         <div className="flex items-center gap-1 mt-1 text-[10px] text-cyan-400">
           <Package className="w-3 h-3" />
           {exec.artifacts.length}
+        </div>
+      )}
+      {/* Review result badge */}
+      {reviewResult && (
+        <div className={`mt-1 text-[10px] flex items-center gap-1 px-1.5 py-0.5 rounded ${
+          reviewResult.approved
+            ? 'bg-emerald-900/40 text-emerald-400'
+            : 'bg-red-900/40 text-red-400'
+        }`}>
+          {reviewResult.approved ? <ShieldCheck className="w-3 h-3" /> : <ShieldAlert className="w-3 h-3" />}
+          {reviewResult.approved ? 'Approved' : `Rejected #${reviewResult.pass_num}`}
+        </div>
+      )}
+      {/* Retry count */}
+      {exec && exec.retry_count > 0 && (
+        <div className="flex items-center gap-1 mt-1 text-[10px] text-amber-400">
+          <RefreshCw className="w-3 h-3" />
+          Retried {exec.retry_count}x
         </div>
       )}
     </button>
@@ -206,6 +246,36 @@ export default function WorkflowDAG({
   const edges = isPreview ? previewEdges : execution?.edges || [];
   const taskExecutions = isPreview ? {} : execution?.task_executions || {};
   const workflowId = isPreview ? '' : execution?.workflow_id;
+
+  // Compute which tasks are reviewers (some task's review_gate points to them)
+  const reviewerTasks = useMemo(() => {
+    const set = new Set<string>();
+    for (const t of tasks) {
+      if (t.review_gate) set.add(t.review_gate);
+    }
+    return set;
+  }, [tasks]);
+
+  // Parse review results from task execution outputs
+  const reviewResults = useMemo(() => {
+    const results: Record<string, { approved: boolean; feedback: string; pass_num: number }> = {};
+    for (const [name, exec] of Object.entries(taskExecutions)) {
+      if (!exec.output) continue;
+      try {
+        const data = JSON.parse(exec.output);
+        if (data._review_decision) {
+          results[name] = {
+            approved: data._review_decision.approved,
+            feedback: data._review_decision.feedback || '',
+            pass_num: data._review_decision.pass_num || 1,
+          };
+        }
+      } catch {
+        // Not JSON, skip
+      }
+    }
+    return results;
+  }, [taskExecutions]);
 
   const layers = useMemo(() => {
     const taskNames = tasks.map((t) => t.name);
@@ -261,10 +331,12 @@ export default function WorkflowDAG({
                     return (
                       <TaskNode
                         key={taskName}
-                        task={task as { name: string; agent_id: string; requires_approval: boolean }}
+                        task={task}
                         exec={!isPreview ? (taskStates[taskName] || taskExecutions[taskName]) : undefined}
                         onClick={() => setSelectedTask(selectedTask === taskName ? null : taskName)}
                         isSelected={selectedTask === taskName}
+                        isReviewer={reviewerTasks.has(taskName)}
+                        reviewResult={reviewResults[taskName] || null}
                       />
                     );
                   })}
@@ -312,6 +384,41 @@ export default function WorkflowDAG({
               {selectedExec.retry_count > 0 && (
                 <div className="text-[10px] text-amber-400 mt-1">
                   Retried {selectedExec.retry_count} time(s)
+                </div>
+              )}
+              {/* Show review result if available */}
+              {selectedTask && reviewResults[selectedTask] && (
+                <div className={`mt-2 p-2 rounded text-xs ${
+                  reviewResults[selectedTask].approved
+                    ? 'bg-emerald-900/20 border border-emerald-700/40'
+                    : 'bg-red-900/20 border border-red-700/40'
+                }`}
+                >
+                  <div className="flex items-center gap-1.5 font-medium mb-1">
+                    {reviewResults[selectedTask].approved ? (
+                      <>
+                        <ShieldCheck className="w-3.5 h-3.5 text-emerald-400" />
+                        <span className="text-emerald-400">Review Approved</span>
+                      </>
+                    ) : (
+                      <>
+                        <ShieldAlert className="w-3.5 h-3.5 text-red-400" />
+                        <span className="text-red-400">Review Rejected (Pass #{reviewResults[selectedTask].pass_num})</span>
+                      </>
+                    )}
+                  </div>
+                  {reviewResults[selectedTask].feedback && (
+                    <div className="text-slate-400 whitespace-pre-wrap break-words max-h-24 overflow-auto">
+                      {reviewResults[selectedTask].feedback}
+                    </div>
+                  )}
+                </div>
+              )}
+              {/* Show review_gate info */}
+              {selectedTask && taskMap.get(selectedTask)?.review_gate && (
+                <div className="mt-2 text-[10px] text-orange-400 flex items-center gap-1">
+                  <ShieldCheck className="w-3 h-3" />
+                  Reviewed by: {taskMap.get(selectedTask)?.review_gate}
                 </div>
               )}
             </div>

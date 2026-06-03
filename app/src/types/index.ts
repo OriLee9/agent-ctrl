@@ -149,6 +149,8 @@ export interface WorkflowExecutionDetail {
     temperature: number | null;
     parallel: boolean;
     has_local_executor: boolean;
+    review_gate: string | null;
+    max_passes: number;
   }>;
   edges: Array<{ from: string; to: string }>;
   task_executions: Record<string, TaskExecutionDetail>;

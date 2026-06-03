@@ -33,7 +33,10 @@ class ToolResult:
         if isinstance(self.output, str):
             return self.output
         if isinstance(self.output, dict):
-            # 优先取 result 字段（如 write_file 返回 {"result": "...", "_artifacts": [...]})
+            # 保留结构化 review decision 供下游解析
+            if "_review_decision" in self.output:
+                return json.dumps(self.output, ensure_ascii=False)
+            # 优先取 result 字段（如 write_file 返回 {"result": "...", "_artifacts": [...]}）
             return str(self.output.get("result", json.dumps(self.output, ensure_ascii=False)))
         return json.dumps(self.output, ensure_ascii=False, indent=2)
 

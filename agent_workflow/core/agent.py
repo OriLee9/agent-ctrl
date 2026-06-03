@@ -223,6 +223,10 @@ class Agent:
             if not llm_resp.tool_calls:
                 final_output = llm_resp.content or ""
                 stop_reason = "done" if final_output else "no_tool_calls"
+                # 记录为一步（LLM 直接输出文本，未调用工具）
+                step = StepRecord(thought=llm_resp.content, usage=llm_resp.usage)
+                step.observation = f"[Direct output] {final_output[:200]}"
+                conv.record_step(step)
                 break
 
             step = StepRecord(thought=llm_resp.content, usage=llm_resp.usage)

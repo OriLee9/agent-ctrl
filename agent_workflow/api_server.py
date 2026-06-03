@@ -341,7 +341,7 @@ def get_workflow_progress():
     completed = sum(
         1 for t in tasks
         if exec_obj and t["name"] in exec_obj.task_executions
-        and exec_obj.task_executions[t["name"]].state.value in ("completed", "recovered")
+        and exec_obj.task_executions[t["name"]].state.value in ("completed", "recovered", "approved")
     ) if exec_obj else 0
     total = len(tasks)
     progress = (completed / total * 100) if total > 0 else 0
@@ -464,6 +464,42 @@ def wf_reject():
     return jsonify({"success": True})
 
 
+# ── Workflow 执行历史 ────────────────────────────────────
+
+@app.route("/api/workflow/history", methods=["GET"])
+def get_workflow_history():
+    """返回 workflow 执行历史列表（扫描 outputs 目录下的 report.json）。"""
+    runs = []
+    outputs_dir = Path(OUTPUTS_DIR)
+    if outputs_dir.exists():
+        for wf_dir in sorted(outputs_dir.iterdir()):
+            if not wf_dir.is_dir():
+                continue
+            for run_dir in sorted(wf_dir.iterdir(), reverse=True):
+                if not run_dir.is_dir():
+                    continue
+                report_path = run_dir / "report.json"
+                if report_path.exists():
+                    try:
+                        with open(report_path, "r", encoding="utf-8") as f:
+                            data = json.load(f)
+                        runs.append({
+                            "run_id": run_dir.name,
+                            "workflow_name": data.get("workflow_name", wf_dir.name),
+                            "workflow_id": data.get("workflow_id", ""),
+                            "started_at": data.get("started_at", 0),
+                            "total_elapsed": data.get("total_elapsed", 0),
+                            "success": data.get("success", False),
+                            "task_count": data.get("task_count", 0),
+                            "completed_count": data.get("completed_count", 0),
+                            "report_path": str(report_path.relative_to(outputs_dir.parent)),
+                        })
+                    except Exception:
+                        continue
+    # Limit to last 20 runs
+    return jsonify({"runs": runs[:20]})
+
+
 # ── Workflow 定义与启动（v3.1 新增）───────────────────────
 
 
@@ -541,6 +577,7 @@ def define_workflow():
             temperature=t.get("temperature"),
             review_gate=t.get("review_gate"),
             max_passes=t.get("max_passes", 1),
+            allowed_tools=t.get("allowed_tools"),
         )
         wf.add_task(t["name"], node)
 

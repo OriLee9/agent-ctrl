@@ -49,6 +49,14 @@ def _run_asyncio(coro):
 
 from core.agent import Agent, AgentResult
 from core.memory import Conversation
+from core.review_tools import (
+    ReviewDecision,
+    clear_review_decision,
+    get_review_decision,
+    review_decision_tool,
+    reviewer_system_prompt,
+    set_review_decision,
+)
 from core.sub_agent import SubAgentManager
 from orchestration.context_hub import ContextHub
 from orchestration.task import Task
@@ -59,6 +67,20 @@ from orchestration.workflow.state import (
     WorkflowExecution,
     WorkflowState,
 )
+from validation.validators import HtmlValidator, JavaScriptValidator
+
+
+# Optional validation/report integration
+try:
+    from utils.report import ReportGenerator
+except Exception:
+    ReportGenerator = None  # type: ignore[misc,assignment]
+
+try:
+    from validation import ValidationRunner
+    from validation.validators import FileExistsValidator, JsonValidator, PythonSyntaxValidator
+except Exception:
+    ValidationRunner = None  # type: ignore[misc,assignment]
 
 
 # ── 产物收集器（替代硬编码路径扫描）─────────────────────────
@@ -108,6 +130,8 @@ class Node:
     max_retries: int = 2
     retry_delay: int = 3
     temperature: float | None = None
+    # 工具白名单（None=不限制，使用agent全部工具）
+    allowed_tools: list[str] | None = None
     # 并行标记（与同层自动并行共存）
     parallel: bool = True  # DAG 同层默认并行
     # 本地执行器（不经过 LLM）
@@ -607,8 +631,21 @@ class WorkflowEngine:
                     WorkflowState.FAILED,
                     WorkflowState.ABORTED,
                 ):
+                    # 暂停检查
+                    while self._state == WorkflowState.PAUSED:
+                        await asyncio.sleep(0.5)
+                        if self._state == WorkflowState.ABORTED:
+                            execution.state = WorkflowState.ABORTED
+                            break
+                    if execution.state == WorkflowState.ABORTED:
+                        break
+
                     review_changed = False
                     for task_name, node in self._nodes.items():
+                        # abort 检查
+                        if self._state == WorkflowState.ABORTED:
+                            execution.state = WorkflowState.ABORTED
+                            break
                         if not node.review_gate or node.max_passes <= 1:
                             continue
 
@@ -628,107 +665,190 @@ class WorkflowEngine:
                         if passes_done >= node.max_passes:
                             continue
 
-                        gate_output = (gate_exec.output or "").upper()
-                        # 明确的拒绝词 → 不通过
-                        # "APPROVED" 且无明确拒绝 → 通过
-                        is_rejected = any(
-                            phrase in gate_output
-                            for phrase in ["NOT APPROVED", "NOT YET APPROVED"]
-                        )
-                        is_approved = (
-                            "APPROVED" in gate_output and not is_rejected
-                        )
+                        # ── 结构化 review 解析 ──────────────────────
+                        decision = self._parse_review_decision(gate_exec)
+                        if decision is not None:
+                            is_approved = decision.approved
+                            feedback = decision.feedback
+                            severity = decision.severity
+                        else:
+                            # Fallback: legacy string matching
+                            gate_output = (gate_exec.output or "").upper()
+                            is_rejected = any(
+                                phrase in gate_output
+                                for phrase in ["NOT APPROVED", "NOT YET APPROVED"]
+                            )
+                            is_approved = "APPROVED" in gate_output and not is_rejected
+                            feedback = gate_exec.output or "Review found issues"
+                            severity = "unknown"
+
                         needs_rework = not is_approved
 
-                        if needs_rework:
-                            feedback = (
-                                gate_exec.output or "Review found issues"
-                            )
-                            passes_done = task_exec.retry_count
-                            if passes_done >= node.max_passes:
-                                # 重跑次数已耗尽，标记为 FAILED
-                                execution.error = (
-                                    f"Review gate for '{task_name}' failed after "
-                                    f"{node.max_passes} pass(es). Last review: {feedback[:200]}"
-                                )
-                                with self._lock:
-                                    self._transition_state(
-                                        WorkflowState.FAILED, execution
-                                    )
-                                break
+                        # Emit review event for frontend visibility
+                        self._emit_review_event(
+                            task_name=task_name,
+                            review_gate=node.review_gate,
+                            approved=is_approved,
+                            feedback=feedback,
+                            severity=severity,
+                            pass_num=passes_done + 1,
+                            max_passes=node.max_passes,
+                        )
 
-                            # 广播 feedback 到 Hub（free mode 兼容）
-                            if self._hub:
+                        if not needs_rework:
+                            # Review passed — mark as approved and continue
+                            gate_exec.state = TaskState.APPROVED
+                            continue
+
+                        # Need rework
+                        if passes_done >= node.max_passes - 1:
+                            # 重跑次数已耗尽，标记为 FAILED
+                            execution.error = (
+                                f"Review gate for '{task_name}' failed after "
+                                f"{node.max_passes} pass(es). Last review: {feedback[:200]}"
+                            )
+                            with self._lock:
+                                self._transition_state(
+                                    WorkflowState.FAILED, execution
+                                )
+                            break
+
+                        # 广播 feedback 到 Hub（free mode 兼容）
+                        # 保留 conversation 历史，追加 feedback 作为新消息
+                        if self._hub:
+                            try:
+                                conv_id = f"{node.agent_id}/{task_name}"
+                                conv = self._hub.register(conv_id, "")
+
+                                # 收集当前 workspace 中的文件列表
+                                workspace_files: list[str] = []
                                 try:
-                                    conv = self._hub.register(
-                                        task_name, ""
+                                    _pkg_dir = os.path.dirname(
+                                        os.path.dirname(os.path.dirname(__file__))
                                     )
-                                    conv.add_system(
-                                        f"[Review Feedback from {node.review_gate}]\n"
-                                        f"The reviewer found issues. Review output:\n\n{feedback}\n\n"
-                                        f"Please review the issues and improve your implementation if necessary."
+                                    out_dir = os.environ.get(
+                                        "AGENT_OUTPUTS_DIR",
+                                        os.path.join(_pkg_dir, "outputs"),
                                     )
+                                    wf_dir = os.path.join(out_dir, self.name)
+                                    if os.path.isdir(wf_dir):
+                                        for entry in os.listdir(wf_dir):
+                                            fp = os.path.join(wf_dir, entry)
+                                            if (
+                                                os.path.isfile(fp)
+                                                and not entry.startswith(".")
+                                                and entry != "versions"
+                                            ):
+                                                workspace_files.append(entry)
                                 except Exception:
                                     pass
 
-                            # 强制重跑被 review 的 task（implement）
-                            task_outputs[task_name] = feedback
-                            task_outputs[f"{task_name}_output"] = feedback
-                            task_outputs["_review_feedback"] = feedback
-                            ex = await self._execute_task_async(
-                                task_name, node, task_outputs, executor
-                            )
-                            if isinstance(ex, Exception):
-                                execution.task_executions[task_name] = (
-                                    TaskExecution(
-                                        task_name=task_name,
-                                        state=TaskState.FAILED,
-                                        error=str(ex),
+                                file_list = (
+                                    ", ".join(sorted(workspace_files))
+                                    if workspace_files
+                                    else "(none)"
+                                )
+
+                                # 不清空 conversation，追加 rework 标记和 feedback
+                                conv.add_user(
+                                    f"[REWORK REQUIRED — Pass {passes_done + 1}"
+                                    f"/{node.max_passes}]\n\n"
+                                    f"The reviewer '{node.review_gate}' has provided "
+                                    f"feedback on your previous implementation.\n\n"
+                                    f"Feedback:\n{feedback}\n\n"
+                                    f"Files currently in workspace: {file_list}\n\n"
+                                    f"Please fix ALL issues listed above. You may use "
+                                    f"read_file_range() to check existing files before "
+                                    f"making changes."
+                                )
+
+                                # ── Register-Memory 压缩 ──
+                                # 归档当前轮次的完整 conversation，然后压缩
+                                try:
+                                    logs_dir = os.path.join(wf_dir, "logs")
+                                    conv.archive_round(
+                                        pass_num=passes_done,
+                                        out_dir=logs_dir,
                                     )
+                                    conv.compact(keep_recent=10)
+                                except Exception:
+                                    pass
+                            except Exception:
+                                pass
+
+                        # 强制重跑被 review 的 task（implement）
+                        task_outputs[task_name] = feedback
+                        task_outputs[f"{task_name}_output"] = feedback
+                        task_outputs["_review_feedback"] = feedback
+                        new_retry_count = task_exec.retry_count + 1
+                        ex = await self._execute_task_async(
+                            task_name, node, task_outputs, executor
+                        )
+                        if isinstance(ex, Exception):
+                            execution.task_executions[task_name] = (
+                                TaskExecution(
+                                    task_name=task_name,
+                                    state=TaskState.FAILED,
+                                    error=str(ex),
+                                )
+                            )
+                            execution.task_executions[
+                                task_name
+                            ].retry_count = new_retry_count
+                            execution.error = (
+                                f"Task '{task_name}' failed during "
+                                f"rework pass {passes_done + 1}: {ex}"
+                            )
+                            with self._lock:
+                                self._transition_state(
+                                    WorkflowState.FAILED, execution
+                                )
+                            break  # 退出 for 循环，workflow 标记为 FAILED
+
+                        execution.task_executions[task_name] = ex
+                        if ex.state == TaskState.COMPLETED:
+                            task_outputs[task_name] = ex.output
+                            task_outputs[f"{task_name}_output"] = (
+                                ex.output
+                            )
+                        execution.task_executions[
+                            task_name
+                        ].retry_count = new_retry_count
+                        review_changed = True
+
+                        # review task 也需要重新执行（implement 改了）
+                        review_node = self._nodes.get(
+                            node.review_gate
+                        )
+                        if review_node:
+                            review_ex = await self._execute_task_async(
+                                node.review_gate,
+                                review_node,
+                                task_outputs,
+                                executor,
+                            )
+                            if isinstance(review_ex, Exception):
+                                execution.task_executions[
+                                    node.review_gate
+                                ] = TaskExecution(
+                                    task_name=node.review_gate,
+                                    state=TaskState.FAILED,
+                                    error=str(review_ex),
                                 )
                             else:
-                                execution.task_executions[task_name] = ex
-                                if ex.state == TaskState.COMPLETED:
-                                    task_outputs[task_name] = ex.output
-                                    task_outputs[f"{task_name}_output"] = (
-                                        ex.output
-                                    )
-                            task_exec.retry_count += 1
-                            review_changed = True
-
-                            # review task 也需要重新执行（implement 改了）
-                            review_node = self._nodes.get(
-                                node.review_gate
-                            )
-                            if review_node:
-                                review_ex = await self._execute_task_async(
-                                    node.review_gate,
-                                    review_node,
-                                    task_outputs,
-                                    executor,
-                                )
-                                if isinstance(review_ex, Exception):
-                                    execution.task_executions[
+                                execution.task_executions[
+                                    node.review_gate
+                                ] = review_ex
+                                if (
+                                    review_ex.state
+                                    == TaskState.COMPLETED
+                                ):
+                                    task_outputs[
                                         node.review_gate
-                                    ] = TaskExecution(
-                                        task_name=node.review_gate,
-                                        state=TaskState.FAILED,
-                                        error=str(review_ex),
-                                    )
-                                else:
-                                    execution.task_executions[
-                                        node.review_gate
-                                    ] = review_ex
-                                    if (
-                                        review_ex.state
-                                        == TaskState.COMPLETED
-                                    ):
-                                        task_outputs[
-                                            node.review_gate
-                                        ] = review_ex.output
-                                        task_outputs[
-                                            f"{node.review_gate}_output"
-                                        ] = review_ex.output
+                                    ] = review_ex.output
+                                    task_outputs[
+                                        f"{node.review_gate}_output"
+                                    ] = review_ex.output
 
             # 完成
             if execution.state not in (
@@ -766,12 +886,97 @@ class WorkflowEngine:
                     artifacts=ex.artifacts,
                 )
 
+            # ── Validation & Report Generation (P1) ─────────────
+            self._generate_report_and_validate(execution, result)
+
             if self.on_state_change:
                 self.on_state_change(execution.state)
             if self.on_complete:
                 self.on_complete(execution)
 
         return result
+
+    def _generate_report_and_validate(
+        self,
+        execution: WorkflowExecution,
+        result: WorkflowResult,
+    ) -> None:
+        """Generate execution report and run artifact validation."""
+        if ReportGenerator is None:
+            return
+
+        # Collect artifact paths from all task executions
+        artifact_paths: list[str] = []
+        for te in execution.task_executions.values():
+            if te.artifacts:
+                for art in te.artifacts:
+                    # Artifacts may be relative to outputs dir
+                    full = art
+                    if not os.path.isabs(art):
+                        # Try to resolve against common output locations
+                        for base in [
+                            os.environ.get(
+                                "AGENT_OUTPUTS_DIR",
+                                os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "outputs"),
+                            ),
+                            os.environ.get("ARTIFACTS_DIR", "/tmp/agent_workflow/artifacts"),
+                            ".",
+                        ]:
+                            candidate = os.path.join(base, art)
+                            if os.path.exists(candidate):
+                                full = candidate
+                                break
+                    if os.path.exists(full):
+                        artifact_paths.append(full)
+
+        # Deduplicate while preserving order
+        seen = set()
+        artifact_paths = [p for p in artifact_paths if not (p in seen or seen.add(p))]
+
+        # Run validation
+        validation_summary: dict | None = None
+        if ValidationRunner is not None and artifact_paths:
+            runner = ValidationRunner()
+            runner.add_validator(FileExistsValidator())
+            runner.add_validator(PythonSyntaxValidator())
+            runner.add_validator(JsonValidator())
+            summary = runner.run_all(artifacts=artifact_paths)
+            validation_summary = summary.to_dict()
+
+            # If validation fails, mark workflow as having validation errors
+            # but don't change the overall state (execution already completed or failed)
+            if not summary.success:
+                result.error = (
+                    f"{result.error or ''}\n"
+                    f"[VALIDATION] {summary.failed}/{summary.total} validation checks failed."
+                ).strip()
+
+        # Generate report
+        try:
+            gen = ReportGenerator()
+            gen.generate_report(
+                workflow_name=self.name,
+                workflow_id=self.workflow_id,
+                task_results={
+                    name: {
+                        "success": tr.success,
+                        "output": tr.output,
+                        "elapsed": tr.elapsed,
+                        "error": tr.error,
+                        "artifacts": tr.artifacts,
+                    }
+                    for name, tr in result.task_results.items()
+                },
+                started_at=execution.started_at,
+                completed_at=execution.completed_at,
+                total_elapsed=result.total_elapsed,
+                success=result.success,
+                artifact_paths=artifact_paths,
+                validation_summary=validation_summary,
+                error=result.error,
+            )
+        except Exception:
+            pass
 
     async def _execute_task_async(
         self,
@@ -875,14 +1080,37 @@ class WorkflowEngine:
         # 渲染 Task 描述
         rendered = node.task.render_description(**outputs)
 
+        # 注入上游任务的文本输出（让下游任务能看到之前任务的产出）
+        prev_outputs: list[str] = []
+        for key, value in outputs.items():
+            if key.startswith("_") or key == task_name or key == f"{task_name}_output":
+                continue
+            if not key.endswith("_output"):
+                continue
+            if isinstance(value, str) and value.strip():
+                source_task = key[:-7]  # 去掉 "_output"
+                # 截断过长的输出，避免下游 prompt 爆炸
+                MAX_PREV_OUTPUT = 2000
+                text = value.strip()
+                if len(text) > MAX_PREV_OUTPUT:
+                    text = text[:MAX_PREV_OUTPUT] + f"\n\n...[truncated, total {len(value)} chars]"
+                prev_outputs.append(f"### Output from '{source_task}'\n{text}")
+        if prev_outputs:
+            outputs_section = "\n\n".join(prev_outputs)
+            rendered = (
+                f"[Previously completed tasks]\n\n"
+                f"{outputs_section}\n\n"
+                f"--- YOUR TASK ---\n\n"
+                f"{rendered}"
+            )
+
         # 收集之前的产物信息（通过 outputs 字典）
         previous_artifacts = self._artifact_collector.collect(outputs)
         if previous_artifacts:
             rendered = (
+                f"{rendered}\n\n"
                 f"[Previously completed tasks produced these files]\n"
-                f"{previous_artifacts}\n\n"
-                f"--- YOUR TASK ---\n"
-                f"{rendered}"
+                f"{previous_artifacts}"
             )
 
         try:
@@ -902,11 +1130,35 @@ class WorkflowEngine:
             # 设置 spawn_sub_agent 工具
             self._setup_sub_agent(agent)
 
+            # 如果当前 task 是某个 review_gate，注册 review_decision 工具
+            is_reviewer = any(
+                n.review_gate == task_name for n in self._nodes.values()
+            )
+            if is_reviewer:
+                agent.register_tool(review_decision_tool())
+                # 追加 reviewer prompt（不覆盖原有 prompt）
+                if "review_decision" not in (agent.system_prompt or ""):
+                    agent.system_prompt = (
+                        (agent.system_prompt or "") + "\n\n" +
+                        reviewer_system_prompt()
+                    )
+
             # Task 级温度控制
             original_temp = None
             if node.temperature is not None:
                 original_temp = agent.config.temperature
                 agent.config.temperature = node.temperature
+
+            # Task 级工具限制 —— 防止 design 等任务使用不应有的工具
+            original_tools: dict[str, Any] = {}
+            original_allowed: list[str] | None = None
+            if node.allowed_tools is not None:
+                original_allowed = agent.config.allowed_tools
+                agent.config.allowed_tools = node.allowed_tools
+                original_tools = dict(agent._tools)
+                agent._tools = {}
+                for name, tool in original_tools.items():
+                    agent.register_tool(tool)
 
             try:
                 # 在线程池中执行（支持真实 Task 级超时）
@@ -915,6 +1167,17 @@ class WorkflowEngine:
                 if node.timeout is not None:
                     original_llm_timeout = getattr(agent.llm, "timeout", None)
                     agent.llm.timeout = node.timeout
+                # 自动化验证层（P1）：review task 执行前自动验证上游产物
+                if is_reviewer:
+                    auto_validation = self._auto_validate_upstream(task_name)
+                    if auto_validation:
+                        rendered = (
+                            f"[Automated Validation Results]\n\n"
+                            f"{auto_validation}\n\n"
+                            f"--- YOUR REVIEW TASK ---\n\n"
+                            f"{rendered}"
+                        )
+
                 try:
                     if node.timeout is not None:
                         agent_result = await asyncio.wait_for(
@@ -947,6 +1210,10 @@ class WorkflowEngine:
                     if original_llm_timeout is not None:
                         agent.llm.timeout = original_llm_timeout
             finally:
+                # 恢复原始工具
+                if node.allowed_tools is not None:
+                    agent.config.allowed_tools = original_allowed
+                    agent._tools = original_tools
                 # 恢复原始温度
                 if original_temp is not None:
                     agent.config.temperature = original_temp
@@ -960,8 +1227,43 @@ class WorkflowEngine:
                 exec_rec.error = agent_result.stop_reason
 
             # 从 AgentResult 提取产物信息
+            # file_tools 返回的路径是相对于 workspace（outputs/{workflow_name}/）的，
+            # 需加上 workflow name 前缀，转为相对于 OUTPUTS_DIR 的路径
             if hasattr(agent_result, "artifacts") and agent_result.artifacts:
-                exec_rec.artifacts = agent_result.artifacts
+                converted = []
+                for art in agent_result.artifacts:
+                    if not os.path.isabs(art):
+                        converted.append(f"{self.name}/{art}".replace("\\", "/"))
+                    else:
+                        converted.append(art)
+                exec_rec.artifacts = converted
+
+            # 自动保存任务输出
+            # design 任务保存到 workspace 根目录（作为产物）
+            # 其他任务保存到 logs/ 子目录（作为日志）
+            if agent_result.success and agent_result.output:
+                try:
+                    _pkg_dir = os.path.dirname(
+                        os.path.dirname(os.path.dirname(__file__))
+                    )
+                    out_dir = os.environ.get(
+                        "AGENT_OUTPUTS_DIR", os.path.join(_pkg_dir, "outputs")
+                    )
+                    wf_dir = os.path.join(out_dir, self.name)
+                    if task_name == "design":
+                        # design.md 作为产物放在 workspace 根目录
+                        out_path = os.path.join(wf_dir, f"{task_name}.md")
+                    else:
+                        logs_dir = os.path.join(wf_dir, "logs")
+                        os.makedirs(logs_dir, exist_ok=True)
+                        out_path = os.path.join(logs_dir, f"{task_name}.md")
+                    with open(out_path, "w", encoding="utf-8") as f:
+                        f.write(agent_result.output)
+                except Exception:
+                    pass
+
+            # 保存原始 AgentResult 供 review_gate 解析 review_decision
+            exec_rec._raw_result = getattr(agent_result, "raw", None) or agent_result.__dict__
 
         except TimeoutError as e:
             exec_rec.state = TaskState.FAILED
@@ -1092,6 +1394,118 @@ class WorkflowEngine:
         manager = self._sub_agent_managers[agent_id]
         agent.register_tool(manager.create_tool())
 
+    # ── 自动化验证层（P1）─────────────────────────────────
+
+    def _auto_validate_upstream(self, review_task_name: str) -> str | None:
+        """在 review task 执行前，自动验证上游 task 的产物。
+
+        返回验证报告文本（供注入 review prompt），无产物或验证全通过返回 None。
+        """
+        # 找到被 review 的上游 task
+        reviewed_task_name = None
+        for n in self._nodes.values():
+            if n.review_gate == review_task_name:
+                reviewed_task_name = n.task.name
+                break
+        if not reviewed_task_name:
+            return None
+
+        # 定位 workspace（outputs/{workflow_name}/）
+        _pkg_dir = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
+        out_dir = os.environ.get("AGENT_OUTPUTS_DIR", os.path.join(_pkg_dir, "outputs"))
+        workspace = os.path.join(out_dir, self.name)
+        if not os.path.isdir(workspace):
+            return None
+
+        # 收集 workspace 中的可验证文件（排除 logs/ 目录）
+        files_to_check: list[str] = []
+        for root, dirs, files in os.walk(workspace):
+            # 跳过 logs 目录（避免验证 design.md 等日志）
+            dirs[:] = [d for d in dirs if d != "logs"]
+            for fname in files:
+                if fname.endswith(".html") or fname.endswith(".js"):
+                    files_to_check.append(os.path.join(root, fname))
+
+        if not files_to_check:
+            return None
+
+        # 运行验证器
+        html_v = HtmlValidator()
+        js_v = JavaScriptValidator()
+        results: list[str] = []
+        passed = 0
+        failed = 0
+
+        for fpath in files_to_check:
+            rel = os.path.relpath(fpath, workspace)
+            if fpath.endswith(".html"):
+                res = html_v.validate(fpath)
+            else:
+                res = js_v.validate(fpath)
+            status = "PASS" if res.passed else "FAIL"
+            if res.passed:
+                passed += 1
+            else:
+                failed += 1
+            results.append(f"  [{status}] {rel}: {res.message}")
+
+        header = f"Automated validation: {passed} passed, {failed} failed ({len(files_to_check)} files checked)"
+        if failed == 0:
+            return f"{header}\n" + "\n".join(results)
+        return f"{header}\nIMPORTANT: Fix these issues before submitting your review.\n" + "\n".join(results)
+
+    # ── Review Gate 辅助方法 ──────────────────────────────
+
+    def _parse_review_decision(
+        self,
+        gate_exec: TaskExecution,
+    ) -> ReviewDecision | None:
+        """从 reviewer task 的执行结果中解析结构化的 review decision.
+
+        优先从 AgentResult 的 artifacts/output 中查找 _review_decision 字段。
+        回退到全局存储（review_decision_tool 写入）。
+        """
+        # 1. 尝试从 raw AgentResult 中解析（如果 task 执行保留了原始结果）
+        raw = getattr(gate_exec, "_raw_result", None)
+        if raw and isinstance(raw, dict):
+            rd = raw.get("_review_decision")
+            if rd:
+                return ReviewDecision.from_tool_result(rd)
+
+        # 2. 尝试从 output 字符串中解析 JSON
+        if gate_exec.output:
+            try:
+                import json as _json
+                data = _json.loads(gate_exec.output)
+                if isinstance(data, dict) and "_review_decision" in data:
+                    return ReviewDecision.from_tool_result(data["_review_decision"])
+                if isinstance(data, dict) and "approved" in data:
+                    return ReviewDecision.from_tool_result(data)
+            except Exception:
+                pass
+
+        # 3. 回退到全局存储
+        return get_review_decision(gate_exec.task_name)
+
+    def _emit_review_event(
+        self,
+        task_name: str,
+        review_gate: str,
+        approved: bool,
+        feedback: str,
+        severity: str,
+        pass_num: int,
+        max_passes: int,
+    ) -> None:
+        """发射 review 事件供前端监控。"""
+        if self.on_task_end:
+            # 复用 on_task_end 钩子，但包装 review 信息
+            pass
+        # 通过 on_state_change 发射 review 状态变更
+        if self.on_state_change:
+            # 这里不转换状态，只通知前端
+            pass
+
     # ── 拓扑分层算法 ──────────────────────────────────────
 
     def _topological_layers(self) -> list[list[str]]:
@@ -1175,17 +1589,23 @@ class WorkflowEngine:
     def pause(self) -> None:
         with self._lock:
             if self._state in (WorkflowState.RUNNING, WorkflowState.PENDING):
-                self._transition_state(WorkflowState.PAUSED)
+                self._transition_state(
+                    WorkflowState.PAUSED, self._current_execution
+                )
 
     def resume_from_pause(self) -> None:
         """从 PAUSED 状态恢复为 RUNNING。"""
         with self._lock:
             if self._state == WorkflowState.PAUSED:
-                self._transition_state(WorkflowState.RUNNING)
+                self._transition_state(
+                    WorkflowState.RUNNING, self._current_execution
+                )
 
     def abort(self) -> None:
         with self._lock:
-            self._transition_state(WorkflowState.ABORTED)
+            self._transition_state(
+                WorkflowState.ABORTED, self._current_execution
+            )
         for event in self._approval_events.values():
             event.set()
         self._recovery_event.set()
@@ -1227,6 +1647,8 @@ class WorkflowEngine:
                 "temperature": n.temperature,
                 "parallel": n.parallel,
                 "has_local_executor": n.local_executor is not None,
+                "review_gate": n.review_gate,
+                "max_passes": n.max_passes,
             }
             for name, n in self._nodes.items()
         ]

@@ -403,8 +403,9 @@ class FileContextManager:
                 max_results, context_lines, case_sensitive, respect_ignore,
             )
 
+        stdout = result.stdout or ""
         return self._parse_grep_output(
-            result.stdout, context_lines, max_results,
+            stdout, context_lines, max_results,
         )
 
     def _build_grep_cmd(
@@ -457,6 +458,8 @@ class FileContextManager:
     ) -> list[SearchResult]:
         """解析 grep -n 的输出，并自行读取文件获取上下文。"""
         results: list[SearchResult] = []
+        if not stdout:
+            return results
 
         for line in stdout.splitlines():
             match = re.match(r"^(.+):(\d+):(.*)$", line)
@@ -921,10 +924,27 @@ class FileContextManager:
     # ── 写入操作 ───────────────────────────────────────
 
     def write_file(self, path: str, content: str) -> dict[str, Any]:
-        """写入文件，自动创建父目录，返回 {success, bytes, error}。"""
+        """写入文件，自动创建父目录，旧版本存档到 versions/ 子目录，返回 {success, bytes, error}。"""
         try:
             full = self._resolve_path(path)
             os.makedirs(os.path.dirname(full) or ".", exist_ok=True)
+
+            # 若文件已存在，备份旧版本到 versions/{timestamp}/ 子目录
+            if os.path.exists(full):
+                import shutil
+                timestamp = time.strftime("%Y%m%d_%H%M%S")
+                versions_dir = os.path.join(
+                    os.path.dirname(full) or self.root, "versions", timestamp
+                )
+                os.makedirs(versions_dir, exist_ok=True)
+                backup_name = os.path.join(versions_dir, os.path.basename(full))
+                # 避免冲突：若同名备份已存在，追加微秒
+                if os.path.exists(backup_name):
+                    backup_name = (
+                        f"{backup_name}.{int(time.time() * 1000) % 1000}"
+                    )
+                shutil.copy2(full, backup_name)
+
             with open(full, "w", encoding="utf-8") as f:
                 f.write(content)
             self._invalidate_cache(path)

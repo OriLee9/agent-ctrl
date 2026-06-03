@@ -35,7 +35,7 @@ export default function AgentDetail({ detail }: Props) {
   }
 
   return (
-    <div className="flex flex-col h-full">
+    <div className="flex flex-col flex-1 min-h-0 overflow-hidden">
       {/* Header */}
       <div className="px-5 py-3 border-b border-slate-700/80 bg-slate-800/50">
         <div className="flex items-center justify-between">
@@ -83,19 +83,19 @@ export default function AgentDetail({ detail }: Props) {
           </TabsTrigger>
         </TabsList>
 
-        <TabsContent value="messages" className="flex-1 min-h-0 mt-2 data-[state=active]:flex flex-col">
+        <TabsContent value="messages" className="flex-1 min-h-[120px] mt-2 flex flex-col overflow-hidden">
           <div className="flex-1 min-h-0 overflow-hidden">
             <MessageFlow messages={detail.messages} />
           </div>
         </TabsContent>
 
-        <TabsContent value="steps" className="flex-1 min-h-0 mt-2 data-[state=active]:flex flex-col">
+        <TabsContent value="steps" className="flex-1 min-h-[120px] mt-2 flex flex-col overflow-hidden">
           <div className="flex-1 min-h-0 overflow-hidden">
             <StepChain steps={detail.steps} />
           </div>
         </TabsContent>
 
-        <TabsContent value="snapshots" className="flex-1 min-h-0 mt-2 p-3 overflow-auto">
+        <TabsContent value="snapshots" className="flex-1 min-h-0 mt-2 p-3 overflow-auto flex flex-col">
           {detail.snapshots.length === 0 ? (
             <p className="text-slate-500 text-sm text-center py-8">No snapshots</p>
           ) : (

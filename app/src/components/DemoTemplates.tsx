@@ -26,6 +26,7 @@ interface DemoTemplate {
       requires_approval?: boolean;
       review_gate?: string;
       max_passes?: number;
+      allowed_tools?: string[];
     }>;
     edges: Array<{ from: string; to: string }>;
   };
@@ -35,44 +36,46 @@ const DEMOS: DemoTemplate[] = [
   {
     id: 'racing',
     name: '3D Racing Game',
-    description: 'Multi-agent: architect → coder → reviewer → complete Three.js game',
+    description: 'Multi-agent: architect → coder → reviewer → Babylon.js single-file racing game',
     icon: <Car className="w-4 h-4" />,
     agents: [
       {
         agent_id: 'architect',
-        temperature: 0.5,
-        system_prompt: `You are an expert 3D game architect. Plan the architecture for a 3D racing game.
-Output a detailed plan: file structure, core systems, physics, rendering, track design, car model, camera, UI, state machine, scoring. Use structured markdown.`,
+        temperature: 0.4,
+        system_prompt: `You are a 3D game architect. Design browser-based games.
+
+STRICT RULES:
+- Output ONLY a markdown architecture document.
+- NO code files. NO write_file(). NO HTML/JS/CSS blocks.
+- Call done() with the complete design document.`,
       },
       {
         agent_id: 'coder',
-        temperature: 0.7,
-        max_iterations: 30,
-        system_prompt: `You are an expert game developer. Write complete, working code.
-Use Three.js r128 from CDN: https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js
+        temperature: 0.6,
+        max_iterations: 40,
+        system_prompt: `You are a game developer. Write complete, working, single-file games.
 
-CRITICAL — Output as a multi-file project directly in the workspace:
-1. Write ALL files directly in the current directory (workspace = project root):
-   write_file("index.html", ...)
-   write_file("game.js", ...)
-   write_file("physics.js", ...)
-   write_file("track.js", ...)
-   write_file("renderer.js", ...)
-   write_file("ui.js", ...)
-   write_file("audio.js", ...)
-2. Use ES modules with <script type="module"> — each .js file = one module
-3. Every function must have real implementation. Target 60fps.
-4. Clean, well-commented, professional code. NO placeholders.`,
+ENGINE: Babylon.js v6 from CDN (https://cdn.jsdelivr.net/npm/babylonjs@6.49.0/babylon.js)
+- Babylon.js provides: 3D rendering, scene graph, FollowCamera, ArcRotateCamera, built-in collision, particle system, GUI system
+- Use ONLY Babylon.js APIs. Do NOT use Three.js.
+
+OUTPUT RULES:
+- Write ONE file only: index.html (all HTML + CSS + JS inline)
+- NO ES modules. NO external .js files. Everything in one file.
+- Every feature must have real implementation. NO placeholders.
+- Call done() when index.html is complete.`,
       },
       {
         agent_id: 'reviewer',
-        temperature: 0.3,
-        max_iterations: 10,
-        system_prompt: `You are a QA engineer. Review the generated code for bugs, performance, completeness.
-Check: game playable? All features work? No errors?
+        temperature: 0.2,
+        max_iterations: 20,
+        system_prompt: `You are a QA engineer. Review code ONCE, list ALL issues.
 
-If the code is ready and has no blocking issues, respond with exactly "APPROVED".
-If there are issues that must be fixed, list them clearly. Do NOT say "APPROVED" if fixes are needed.`,
+Rules:
+1. Read design.md and index.html BEFORE writing feedback.
+2. List EVERY issue in one pass. Do not stop at the first.
+3. Only approve when 100% certain.
+4. Call review_decision(approved=True) or review_decision(approved=False, feedback=...).`,
       },
     ],
     workflow: {
@@ -80,77 +83,180 @@ If there are issues that must be fixed, list them clearly. Do NOT say "APPROVED"
       tasks: [
         {
           name: 'design',
-          description: `Design a 3D racing game architecture.
+          description: `Design a 3D arcade racing game.
 
-Plan:
-1. Single index.html with inline Three.js (CDN r128)
-2. Core: game loop, physics (acceleration, braking, steering, collision)
-3. Track: curved road, barriers, scenery (trees, buildings, mountains)
-4. Car: procedural geometry model
-5. Camera: chase cam + overhead minimap
-6. UI: speedometer, lap timer, gear indicator, position
-7. States: title → countdown → racing → finish → results
-8. Scoring: lap times, best lap via localStorage
-9. Effects: particles (dust, sparks), Web Audio engine sound
-10. Controls: W/S speed, A/D steer, R reset, C camera toggle
+Architecture plan (markdown only, no code):
+1. ENGINE: Babylon.js v6 (CDN) — scene, camera, mesh collision, particles, GUI
+2. FILE: Single index.html with inline CSS/JS
+3. SCENE: Skybox, ground plane, track (spline/curve-based road with barriers)
+4. CAR: Simple mesh (box body + 4 cylinder wheels), position/rotation updates
+5. PHYSICS: Manual — acceleration, braking, steering angle, drift/friction, speed cap
+6. CAMERA: FollowCamera (chase) + hotkey toggle to ArcRotateCamera
+7. INPUT: W/S throttle/brake, A/D steer, Space handbrake, R reset, C camera toggle
+8. STATES: Title screen → Countdown (3-2-1) → Racing → Lap complete / Finish → Results table
+9. SCORING: 3 laps, lap timer, total time, best lap → localStorage persistence
+10. UI: Speed HUD, lap counter, timer, minimap (top-down viewport)
+11. EFFECTS: Skid marks (decal trails), dust particles when off-road
+12. AUDIO: Web Audio API — engine pitch by RPM, crash noise, skid
 
-Output the complete architecture plan as structured markdown.`,
+CRITICAL: Output ONLY markdown. No code blocks.`,
           agent_id: 'architect',
           expected_output: 'Architecture plan',
+          allowed_tools: ['done', 'think'],
         },
         {
           name: 'implement',
-          description: `Build the COMPLETE 3D racing game as a multi-file project.
+          description: `Build a COMPLETE 3D racing game as a SINGLE index.html file.
 
-TOOLS AVAILABLE:
-- write_file(path, content) → write source files
-- read_file_range(path)     → read existing files
+ENGINE: Babylon.js v6
+  <script src="https://cdn.jsdelivr.net/npm/babylonjs@6.49.0/babylon.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/babylonjs-gui@6.49.0/babylon.gui.min.js"></script>
 
-STEP: Write each module as a separate file directly in the workspace:
-  write_file("index.html", "...")   # HTML + canvas + module imports
-  write_file("game.js", "...")       # Game loop, state machine, orchestration
-  write_file("physics.js", "...")    # Vehicle dynamics: acceleration, braking, steering, collision
-  write_file("track.js", "...")      # Track geometry: road, curbs, barriers, scenery
-  write_file("renderer.js", "...")   # Three.js scene, camera, lighting, post-processing
-  write_file("ui.js", "...")         # HUD: speedometer, lap timer, minimap, gear indicator
-  write_file("audio.js", "...")      # Web Audio engine sound, collision, skid
+TOOLS: write_file(path, content), read_file_range(path)
 
-REQUIREMENTS PER MODULE:
-- game.js: Title → countdown → race → finish loop, game state machine, FPS counter
-- physics.js: Acceleration curves, braking force, steering angle, drag, drift detection, AABB collision
-- track.js: Procedural curved road mesh, barriers, trees, buildings, mountains
-- renderer.js: Three.js r128 CDN import, scene setup, chase camera, dynamic lighting, fog, shadows
-- ui.js: Canvas overlay — speedometer dial, lap counter, timer, gear position, minimap
-- audio.js: Web Audio API — engine RPM synth, collision thud, tire skid at high slip angle
-- index.html: Canvas element, module map, loading screen, responsive viewport
+REFERENCE: Read design.md for architecture details.
+
+Write ONE file:
+  write_file("index.html", "...")
+
+index.html MUST contain ALL of the following inline:
+- <style>: Full-screen canvas, HUD overlay (speed, lap, timer), title/results screens
+- <script>: Babylon.js game code including:
+
+  [1] Scene Setup
+    - Create engine + canvas + scene
+    - Skybox or gradient clear color
+    - Directional light + hemispheric light
+    - Shadow generator
+
+  [2] Track
+    - Build a closed-loop track using Babylon paths or positioned meshes
+    - Road surface (flat box segments or extruded shape)
+    - Barrier walls on both sides (use checkCollisions = true)
+    - Start/finish line marker
+    - Scenery: simple trees/bushes (cylinder + sphere) around track
+
+  [3] Car
+    - Body: Box mesh, colored material
+    - 4 wheels: Cylinder meshes, parented to body
+    - Position car at start line, facing track direction
+
+  [4] Physics (manual — no physics engine needed)
+    - speed, maxSpeed, acceleration, braking, friction
+    - steering angle, turnSpeed, drift factor
+    - Apply velocity to car position each frame
+    - Simple collision: if car intersects barrier, bounce back slightly
+
+  [5] Camera
+    - FollowCamera: follows car from behind at offset
+    - Press C to toggle to ArcRotateCamera (orbit view)
+
+  [6] Input
+    - W/S: throttle / brake
+    - A/D: steer
+    - Space: handbrake (reduce speed rapidly)
+    - R: reset to last checkpoint
+    - C: toggle camera
+
+  [7] Game Loop / States
+    - TITLE: Show title + "Press Enter to Start"
+    - COUNTDOWN: 3-2-1 GO
+    - RACING: Timer running, check lap completion
+    - FINISHED: Show results (3 lap times + total + best)
+    - Restart from results screen
+
+  [8] Lap Detection
+    - Define checkpoints around track (3-4 points)
+    - Car must pass all checkpoints in order before finish line counts as lap
+    - 3 laps total
+
+  [9] HUD (DOM overlay or Babylon GUI)
+    - Current speed (km/h)
+    - Lap count (e.g. "Lap 2/3")
+    - Current lap time
+    - Best lap time
+
+  [10] Audio
+    - Engine sound: oscillator pitch varies with speed
+    - Crash sound when hitting barrier
+    - Skid sound during handbrake
+
+  [11] Extras
+    - localStorage: save best lap time, load on startup
+    - FPS counter visible
+    - Responsive canvas (resize handler)
+
+FINAL STEP — Write IMPLEMENTATION_SUMMARY.md:
+  write_file("IMPLEMENTATION_SUMMARY.md", "...") with:
+  - Checklist of all 11 sections above — mark each as IMPLEMENTED or NOT IMPLEMENTED
+  - Any deviations from design.md
 
 CRITICAL:
-- Every function MUST have real implementation. NO placeholders, NO stubs, NO "TODO".
-- Use ES module imports (e.g., import { Game } from './game.js')
-- Three.js loaded via CDN in index.html, referenced as global 'THREE'
-- The game MUST be playable — real physics, real rendering, real audio
-- Write ALL files. After writing each, say which file was written.`,
+- ONE file only: index.html
+- NO external .js files, NO ES modules
+- All Babylon.js code uses the global BABYLON object
+- The game must be playable: car drives, laps count, timer works
+- Call done() when index.html is written.`,
           agent_id: 'coder',
           expected_output: 'Complete index.html',
-          max_passes: 3,
+          max_passes: 2,
           review_gate: 'review',
         },
         {
           name: 'review',
-          description: `Review the generated 3D racing game.
+          description: `Review the generated racing game. Read the files, then decide.
 
-Check:
-1. Playable? Controls work, physics feel right?
-2. All features present? Track, car, camera, UI, sound, particles?
-3. JavaScript errors? Missing refs, undefined vars?
-4. Performance: smooth 60fps?
-5. Code quality: structured, commented?
-6. Three.js: correct API, cleanup?
-7. HTML: valid, responsive?
+STEP 1 — Read:
+  read_file_range("design.md")
+  read_file_range("index.html")
 
-List issues with line refs. Write "APPROVED" if ready.`,
+STEP 2 — Check EVERY item below. List ALL issues found.
+
+  [Track]
+  - Is there a visible track with road and barriers?
+  - Can the car drive on the track without falling through?
+
+  [Car]
+  - Does the car have a visible body + 4 wheels?
+  - Does it move when W/S/A/D is pressed?
+
+  [Physics]
+  - Does speed increase with W, decrease with S/Space?
+  - Is there a speed cap?
+  - Does steering work?
+  - Is there friction/drift?
+
+  [Camera]
+  - Does a follow camera track the car?
+  - Does C toggle camera mode?
+
+  [Lap System]
+  - Are there 3 laps?
+  - Does the lap counter increment?
+  - Is there a timer per lap?
+
+  [HUD]
+  - Is speed displayed?
+  - Is lap count displayed?
+  - Is timer displayed?
+
+  [States]
+  - Title screen → countdown → race → finish flow works?
+
+  [Audio]
+  - Any engine/crash/skid sound?
+
+  [Code Quality]
+  - No syntax errors?
+  - No undefined variables?
+  - Babylon.js APIs used correctly?
+
+STEP 3 — Verdict:
+  review_decision(approved=True) — ONLY if all checks pass
+  review_decision(approved=False, feedback=complete_issue_list) — if ANY issue`,
           agent_id: 'reviewer',
           expected_output: 'Review report',
+          allowed_tools: ['done', 'think', 'read_file_range', 'review_decision'],
         },
       ],
       edges: [
@@ -169,7 +275,14 @@ List issues with line refs. Write "APPROVED" if ready.`,
         agent_id: 'architect',
         temperature: 0.5,
         system_prompt: `You are a creative game designer and architect. Design innovative browser-based games.
-Output detailed plans: game mechanics, visual design, file structure, core systems, controls, scoring. Use structured markdown.`,
+Output detailed plans: game mechanics, visual design, file structure, core systems, controls, scoring.
+
+STRICT OUTPUT RULES — DESIGN MODE ONLY:
+- You MUST output ONLY a markdown architecture document.
+- You MUST NOT write any code files. DO NOT use write_file() or any file tools.
+- You MUST NOT include HTML, JavaScript, or CSS code blocks in your output.
+- Your output must be a pure design/architecture document with explanations and plans.
+- Call done() with your complete design document when finished.`,
       },
       {
         agent_id: 'coder',
@@ -186,12 +299,14 @@ CRITICAL — Output as a single-file project directly in the workspace:
       {
         agent_id: 'reviewer',
         temperature: 0.3,
-        max_iterations: 10,
-        system_prompt: `You are a QA engineer. Review the generated code for bugs, performance, completeness.
-Check: game playable? All features work? No errors?
+        max_iterations: 25,
+        system_prompt: `You are a senior QA engineer. Your goal is to review code ONCE and list ALL issues in a single pass.
 
-If the code is ready and has no blocking issues, respond with exactly "APPROVED".
-If there are issues that must be fixed, list them clearly. Do NOT say "APPROVED" if fixes are needed.`,
+Rules:
+1. Read ALL reference files (design.md + IMPLEMENTATION_SUMMARY.md + source files) before writing any feedback.
+2. List EVERY issue you find in ONE comprehensive list. Do NOT stop at the first issue.
+3. Only call review_decision(approved=True) when you are 100% certain everything is correct.
+4. If ANY issue exists, call review_decision(approved=False) with the complete list.`,
       },
     ],
     workflow: {
@@ -211,9 +326,13 @@ If there are issues that must be fixed, list them clearly. Do NOT say "APPROVED"
 8. **Score Persistence** — localStorage high score
 9. **Responsive Design** — Works on both desktop (keyboard) and mobile (touch swipe)
 
-Output a detailed architecture plan as structured markdown.`,
+CRITICAL: Output ONLY a markdown architecture document.
+DO NOT write any code files. DO NOT use write_file() or any file tools.
+DO NOT include HTML, JavaScript, or CSS code blocks.
+Your output must be a pure design/architecture document.`,
           agent_id: 'architect',
           expected_output: 'Game design document',
+          allowed_tools: ['done', 'think'],
         },
         {
           name: 'implement',
@@ -221,6 +340,9 @@ Output a detailed architecture plan as structured markdown.`,
 
 TOOLS AVAILABLE:
 - write_file(path, content) → write source files
+- read_file_range(path)     → read existing files
+
+REFERENCE: The full architecture design document is at design.md — read it if you need details.
 
 Write the game as a SINGLE index.html file:
   write_file("index.html", "...")   # Complete game with inline CSS + JS
@@ -241,34 +363,44 @@ REQUIREMENTS:
 - localStorage for high score persistence
 - Sound effects using Web Audio API (eat, crash, power-up, combo)
 
+FINAL STEP — Write IMPLEMENTATION_SUMMARY.md:
+  After index.html is written, call write_file("IMPLEMENTATION_SUMMARY.md", "...") with:
+  - Checklist of every design requirement and whether it is implemented
+  - Any known issues or deviations from the design doc
+
 CRITICAL:
 - Every function MUST have real implementation. NO placeholders, NO stubs, NO TODO.
 - The game MUST be fully playable with all features working.
 - Single file only. After writing, verify the file is complete.`,
           agent_id: 'coder',
           expected_output: 'Complete index.html',
-          max_passes: 3,
+          max_passes: 2,
           review_gate: 'review',
         },
         {
           name: 'review',
-          description: `Review the generated Snake game.
+          description: `Review the generated Snake game against the design spec — ONE PASS, list ALL issues.
 
-Check:
-1. Playable? Controls responsive, snake moves smoothly?
-2. Warp mode working? Pass through walls correctly?
-3. Dash boost working? Fuel consumption, visual feedback?
-4. Power-ups all functional? Correct durations and effects?
-5. Combo chain working? Timer and bonus points?
-6. Obstacles spawning at correct milestones?
-7. Sound effects present? Web Audio API correct?
-8. Mobile touch controls working?
-9. No JavaScript errors?
-10. Single file? No external dependencies?
+STEP 1 — Read reference documents:
+  read_file_range("design.md")
+  read_file_range("IMPLEMENTATION_SUMMARY.md")
 
-List issues with line refs. Write "APPROVED" if ready.`,
+STEP 2 — Read source file:
+  read_file_range("index.html")
+
+STEP 3 — Compile ONE comprehensive issue list:
+- Check EVERY requirement from the design doc (warp, dash, obstacles, combo, power-ups, particles, shake, difficulty, persistence, responsive, sound)
+- List ALL issues found (not just the first one)
+- Include line numbers if possible
+
+STEP 4 — Submit verdict:
+- If zero issues → review_decision(approved=True)
+- If any issues → review_decision(approved=False, feedback=complete_list)
+
+Do NOT call done(). Use review_decision() to submit your verdict.`,
           agent_id: 'reviewer',
           expected_output: 'Review report',
+          allowed_tools: ['done', 'think', 'read_file_range', 'review_decision'],
         },
       ],
       edges: [

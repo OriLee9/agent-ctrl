@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect } from 'react';
+import { useState, useCallback, useEffect, useRef } from 'react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Textarea } from '@/components/ui/textarea';
@@ -19,8 +19,25 @@ import {
   type TaskDef,
   type EdgeDef,
 } from '@/hooks/useApi';
-import WorkflowDAG from './WorkflowDAG';
-import { Plus, Trash2, ArrowRight, Save, GitBranch } from 'lucide-react';
+import {
+  saveWorkflowHistory,
+  loadWorkflowHistory,
+  deleteWorkflowHistory,
+  type WorkflowHistoryItem,
+} from '@/lib/workflowHistory';
+import {
+  Plus,
+  Trash2,
+  ArrowRight,
+  Save,
+  GitBranch,
+  FilePlus,
+  History,
+  ChevronDown,
+  ChevronUp,
+  RotateCcw,
+  X,
+} from 'lucide-react';
 
 interface Props {
   registeredAgents: string[];
@@ -32,17 +49,51 @@ export default function WorkflowBuilder({ registeredAgents }: Props) {
   const [wfMode, setWfMode] = useState<'free' | 'fixed'>('free');
   const [tasks, setTasks] = useState<TaskDef[]>([]);
   const [edges, setEdges] = useState<EdgeDef[]>([]);
-  const [newTask, setNewTask] = useState<TaskDef>({
+
+  // New Task form state
+  const [newTask, setNewTask] = useState<TaskDef>(({
     name: '',
     description: '',
     agent_id: '',
+  }));
+  const [showAdvanced, setShowAdvanced] = useState(false);
+  const [advancedFields, setAdvancedFields] = useState({
+    requires_approval: false,
+    max_retries: 2,
+    temperature: undefined as number | undefined,
+    review_gate: '',
+    max_passes: 1,
   });
+
   const [edgeFrom, setEdgeFrom] = useState('');
   const [edgeTo, setEdgeTo] = useState('');
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
 
-  // 同步已定义的 workflow 到本地状态
+  // History dropdown
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const [historyList, setHistoryList] = useState<WorkflowHistoryItem[]>([]);
+  const historyRef = useRef<HTMLDivElement>(null);
+
+  // Load history list when dropdown opens
+  useEffect(() => {
+    if (historyOpen) {
+      setHistoryList(loadWorkflowHistory());
+    }
+  }, [historyOpen]);
+
+  // Click outside to close history dropdown
+  useEffect(() => {
+    function handleClick(e: MouseEvent) {
+      if (historyRef.current && !historyRef.current.contains(e.target as Node)) {
+        setHistoryOpen(false);
+      }
+    }
+    document.addEventListener('mousedown', handleClick);
+    return () => document.removeEventListener('mousedown', handleClick);
+  }, []);
+
+  // Sync from backend definition
   useEffect(() => {
     if (definition?.defined && definition.workflow) {
       const wf = definition.workflow;
@@ -56,22 +107,44 @@ export default function WorkflowBuilder({ registeredAgents }: Props) {
           requires_approval: t.requires_approval as boolean | undefined,
           max_retries: t.max_retries as number | undefined,
           temperature: t.temperature as number | undefined,
+          review_gate: t.review_gate ? String(t.review_gate) : undefined,
+          max_passes: t.max_passes as number | undefined,
         })));
+      } else {
+        setTasks([]);
       }
       if (wf.edges && wf.edges.length > 0) {
         setEdges(wf.edges.map((e: { from?: string; to?: string }) => ({
           from: e.from || '',
           to: e.to || '',
         })));
+      } else {
+        setEdges([]);
       }
     }
   }, [definition?.defined, definition?.workflow?.workflow_id]);
 
   const addTask = useCallback(() => {
     if (!newTask.name.trim() || !newTask.description.trim()) return;
-    setTasks(prev => [...prev, { ...newTask }]);
+    const task: TaskDef = {
+      ...newTask,
+      requires_approval: advancedFields.requires_approval || undefined,
+      max_retries: advancedFields.max_retries || undefined,
+      temperature: advancedFields.temperature,
+      review_gate: advancedFields.review_gate || undefined,
+      max_passes: advancedFields.max_passes > 1 ? advancedFields.max_passes : undefined,
+    };
+    setTasks(prev => [...prev, task]);
     setNewTask({ name: '', description: '', agent_id: '' });
-  }, [newTask]);
+    setAdvancedFields({
+      requires_approval: false,
+      max_retries: 2,
+      temperature: undefined,
+      review_gate: '',
+      max_passes: 1,
+    });
+    setShowAdvanced(false);
+  }, [newTask, advancedFields]);
 
   const removeTask = useCallback((name: string) => {
     setTasks(prev => prev.filter(t => t.name !== name));
@@ -109,30 +182,129 @@ export default function WorkflowBuilder({ registeredAgents }: Props) {
     } finally {
       setSaving(false);
     }
-  }, [wfName, tasks, edges, refetch]);
+  }, [wfName, tasks, edges, wfMode, refetch]);
+
+  const handleSaveLocal = useCallback(() => {
+    if (tasks.length === 0) return;
+    saveWorkflowHistory({
+      name: wfName,
+      mode: wfMode,
+      tasks,
+      edges,
+    });
+    setHistoryList(loadWorkflowHistory());
+  }, [wfName, wfMode, tasks, edges]);
+
+  const handleNew = useCallback(() => {
+    setWfName('my_workflow');
+    setWfMode('free');
+    setTasks([]);
+    setEdges([]);
+    setNewTask({ name: '', description: '', agent_id: '' });
+    setError('');
+  }, []);
+
+  const handleLoadHistory = useCallback((item: WorkflowHistoryItem) => {
+    setWfName(item.name);
+    setWfMode(item.mode);
+    setTasks(item.tasks);
+    setEdges(item.edges);
+    setHistoryOpen(false);
+    setError('');
+  }, []);
+
+  const handleDeleteHistory = useCallback((id: string, e: React.MouseEvent) => {
+    e.stopPropagation();
+    deleteWorkflowHistory(id);
+    setHistoryList(loadWorkflowHistory());
+  }, []);
 
   const hasDefinition = definition?.defined && definition?.workflow;
 
+  // Other task names for review_gate dropdown
+  const otherTaskNames = tasks.map(t => t.name);
+
   return (
     <div className="h-full flex flex-col">
-      <div className="flex items-center justify-between px-4 py-3 border-b border-slate-700/80 bg-slate-800/50">
-        <div className="flex items-center gap-2 min-w-0">
-          <GitBranch className="w-4 h-4 text-cyan-400 shrink-0" />
-          <h2 className="text-sm font-semibold text-slate-200 truncate">Workflow Builder</h2>
-          {hasDefinition && (
-            <Badge variant="outline" className="text-xs bg-emerald-900/30 text-emerald-400 border-emerald-700/60 shrink-0">
-              Defined: {definition.workflow!.name}
-            </Badge>
-          )}
+      {/* ── Top Action Bar ── */}
+      <div className="flex items-center justify-between px-3 py-2 border-b border-slate-700/80 bg-slate-800/50 gap-2">
+        <div className="flex items-center gap-1.5">
+          <Button
+            size="sm"
+            variant="ghost"
+            className="h-7 px-2 text-xs text-slate-300 hover:text-white hover:bg-slate-700"
+            onClick={handleNew}
+            title="New workflow"
+          >
+            <FilePlus className="w-3.5 h-3.5 mr-1" /> New
+          </Button>
+
+          {/* History Dropdown */}
+          <div className="relative" ref={historyRef}>
+            <Button
+              size="sm"
+              variant="ghost"
+              className="h-7 px-2 text-xs text-slate-300 hover:text-white hover:bg-slate-700"
+              onClick={() => setHistoryOpen(!historyOpen)}
+            >
+              <History className="w-3.5 h-3.5 mr-1" /> History
+              <ChevronDown className={`w-3 h-3 ml-1 transition-transform ${historyOpen ? 'rotate-180' : ''}`} />
+            </Button>
+            {historyOpen && (
+              <div className="absolute top-full left-0 mt-1 w-56 bg-slate-800 border border-slate-700 rounded-md shadow-lg z-50 py-1">
+                {historyList.length === 0 ? (
+                  <div className="px-3 py-2 text-xs text-slate-500">No saved workflows</div>
+                ) : (
+                  historyList.map(item => (
+                    <div
+                      key={item.id}
+                      className="flex items-center justify-between px-3 py-1.5 hover:bg-slate-700/60 cursor-pointer group"
+                      onClick={() => handleLoadHistory(item)}
+                    >
+                      <div className="min-w-0">
+                        <div className="text-xs text-slate-200 truncate">{item.name}</div>
+                        <div className="text-[10px] text-slate-500">
+                          {item.tasks.length} tasks · {new Date(item.createdAt).toLocaleDateString()}
+                        </div>
+                      </div>
+                      <button
+                        className="text-slate-600 hover:text-red-400 opacity-0 group-hover:opacity-100 shrink-0 p-1"
+                        onClick={(e) => handleDeleteHistory(item.id, e)}
+                      >
+                        <X className="w-3 h-3" />
+                      </button>
+                    </div>
+                  ))
+                )}
+              </div>
+            )}
+          </div>
+
+          <Button
+            size="sm"
+            variant="ghost"
+            className="h-7 px-2 text-xs text-slate-300 hover:text-white hover:bg-slate-700"
+            onClick={handleSaveLocal}
+            disabled={tasks.length === 0}
+            title="Save to local history"
+          >
+            <Save className="w-3.5 h-3.5 mr-1" /> Save
+          </Button>
         </div>
+
+        {hasDefinition && (
+          <Badge variant="outline" className="text-[10px] bg-emerald-900/30 text-emerald-400 border-emerald-700/60 shrink-0">
+            {definition.workflow!.name}
+          </Badge>
+        )}
       </div>
 
       <ScrollArea className="flex-1">
-        <div className="p-4 space-y-5">
-          {/* Workflow Name + Mode */}
+        <div className="p-3 space-y-4">
+          {/* ── Workflow Name + Mode ── */}
           <div className="space-y-1.5">
             <div className="flex items-center justify-between">
-              <Label className="text-xs text-slate-400">Workflow Name</Label>
+              <Label className="text-xs text-slate-400">Name</Label>
               <div className="flex items-center gap-1 text-[10px]">
                 <button
                   onClick={() => setWfMode('free')}
@@ -151,12 +323,12 @@ export default function WorkflowBuilder({ registeredAgents }: Props) {
             <Input
               value={wfName}
               onChange={e => setWfName(e.target.value)}
-              className="bg-slate-900 border-slate-700 text-slate-200 text-sm h-9"
+              className="bg-slate-900 border-slate-700 text-slate-200 text-sm h-8"
               placeholder="my_workflow"
             />
           </div>
 
-          {/* Add Task */}
+          {/* ── Add Task ── */}
           <Card className="bg-slate-800/60 border-slate-700/60">
             <CardHeader className="py-2 px-3">
               <CardTitle className="text-xs text-slate-300 flex items-center gap-1">
@@ -176,10 +348,10 @@ export default function WorkflowBuilder({ registeredAgents }: Props) {
                   onValueChange={v => setNewTask(prev => ({ ...prev, agent_id: v === '_none' ? '' : v }))}
                 >
                   <SelectTrigger className="bg-slate-900 border-slate-700 text-slate-200 text-xs h-8">
-                    <SelectValue placeholder="Select agent" />
+                    <SelectValue placeholder="Agent" />
                   </SelectTrigger>
                   <SelectContent className="bg-slate-800 border-slate-700 text-slate-200">
-                    <SelectItem value="_none">Auto-assign</SelectItem>
+                    <SelectItem value="_none">Auto</SelectItem>
                     {registeredAgents.map(a => (
                       <SelectItem key={a} value={a}>{a}</SelectItem>
                     ))}
@@ -190,8 +362,96 @@ export default function WorkflowBuilder({ registeredAgents }: Props) {
                 value={newTask.description}
                 onChange={e => setNewTask(prev => ({ ...prev, description: e.target.value }))}
                 placeholder="Task description (prompt for agent)..."
-                className="bg-slate-900 border-slate-700 text-slate-200 text-xs h-16 resize-none placeholder:text-slate-600"
+                className="bg-slate-900 border-slate-700 text-slate-200 text-xs h-12 resize-none placeholder:text-slate-600"
               />
+
+              {/* Advanced toggle */}
+              <button
+                className="flex items-center gap-1 text-[10px] text-slate-500 hover:text-slate-300 transition-colors"
+                onClick={() => setShowAdvanced(!showAdvanced)}
+              >
+                {showAdvanced ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
+                Advanced
+              </button>
+
+              {showAdvanced && (
+                <div className="space-y-2 pt-1 border-t border-slate-700/40">
+                  {/* Review Gate */}
+                  <div className="grid grid-cols-2 gap-2">
+                    <div className="space-y-1">
+                      <Label className="text-[10px] text-slate-500">Review Gate</Label>
+                      <Select
+                        value={advancedFields.review_gate || '_none'}
+                        onValueChange={v => setAdvancedFields(prev => ({ ...prev, review_gate: v === '_none' ? '' : v }))}
+                      >
+                        <SelectTrigger className="bg-slate-900 border-slate-700 text-slate-200 text-xs h-8">
+                          <SelectValue placeholder="None" />
+                        </SelectTrigger>
+                        <SelectContent className="bg-slate-800 border-slate-700 text-slate-200">
+                          <SelectItem value="_none">None</SelectItem>
+                          {otherTaskNames.map(name => (
+                            <SelectItem key={name} value={name}>{name}</SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    </div>
+                    <div className="space-y-1">
+                      <Label className="text-[10px] text-slate-500">Max Passes</Label>
+                      <Input
+                        type="number"
+                        min={1}
+                        max={10}
+                        value={advancedFields.max_passes}
+                        onChange={e => setAdvancedFields(prev => ({ ...prev, max_passes: parseInt(e.target.value) || 1 }))}
+                        className="bg-slate-900 border-slate-700 text-slate-200 text-xs h-8"
+                      />
+                    </div>
+                  </div>
+                  {/* Approval + Retries + Temperature */}
+                  <div className="grid grid-cols-3 gap-2">
+                    <div className="space-y-1">
+                      <Label className="text-[10px] text-slate-500">Approval</Label>
+                      <Select
+                        value={advancedFields.requires_approval ? 'yes' : 'no'}
+                        onValueChange={v => setAdvancedFields(prev => ({ ...prev, requires_approval: v === 'yes' }))}
+                      >
+                        <SelectTrigger className="bg-slate-900 border-slate-700 text-slate-200 text-xs h-8">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent className="bg-slate-800 border-slate-700 text-slate-200">
+                          <SelectItem value="no">No</SelectItem>
+                          <SelectItem value="yes">Yes</SelectItem>
+                        </SelectContent>
+                      </Select>
+                    </div>
+                    <div className="space-y-1">
+                      <Label className="text-[10px] text-slate-500">Retries</Label>
+                      <Input
+                        type="number"
+                        min={0}
+                        max={5}
+                        value={advancedFields.max_retries}
+                        onChange={e => setAdvancedFields(prev => ({ ...prev, max_retries: parseInt(e.target.value) || 0 }))}
+                        className="bg-slate-900 border-slate-700 text-slate-200 text-xs h-8"
+                      />
+                    </div>
+                    <div className="space-y-1">
+                      <Label className="text-[10px] text-slate-500">Temp</Label>
+                      <Input
+                        type="number"
+                        min={0}
+                        max={2}
+                        step={0.1}
+                        value={advancedFields.temperature ?? ''}
+                        onChange={e => setAdvancedFields(prev => ({ ...prev, temperature: e.target.value ? parseFloat(e.target.value) : undefined }))}
+                        className="bg-slate-900 border-slate-700 text-slate-200 text-xs h-8"
+                        placeholder="0.7"
+                      />
+                    </div>
+                  </div>
+                </div>
+              )}
+
               <Button
                 size="sm"
                 className="w-full bg-cyan-700 hover:bg-cyan-600 text-white h-8 text-xs transition-colors"
@@ -203,38 +463,53 @@ export default function WorkflowBuilder({ registeredAgents }: Props) {
             </CardContent>
           </Card>
 
-          {/* Task List */}
+          {/* ── Task List ── */}
           {tasks.length > 0 && (
-            <div className="space-y-2">
+            <div className="space-y-1.5">
               <Label className="text-xs text-slate-400">Tasks ({tasks.length})</Label>
               {tasks.map((t, i) => (
                 <div
                   key={i}
-                  className="flex items-start gap-2 p-2.5 rounded bg-slate-800/60 border border-slate-700/50 group hover:border-slate-600/60 transition-colors"
+                  className="flex items-start gap-2 p-2 rounded bg-slate-800/60 border border-slate-700/50 group hover:border-slate-600/60 transition-colors"
                 >
                   <div className="flex-1 min-w-0">
-                    <div className="flex items-center gap-2">
-                      <span className="text-sm font-medium text-slate-200 truncate">{t.name}</span>
+                    <div className="flex items-center gap-1.5 flex-wrap">
+                      <span className="text-xs font-medium text-slate-200">{t.name}</span>
                       {t.agent_id && (
                         <Badge variant="outline" className="text-[10px] py-0 px-1 bg-slate-700/60 text-slate-400 border-slate-600 shrink-0">
                           {t.agent_id}
                         </Badge>
                       )}
+                      {t.review_gate && (
+                        <Badge variant="outline" className="text-[10px] py-0 px-1 bg-orange-900/30 text-orange-400 border-orange-700/60 shrink-0">
+                          R: {t.review_gate}
+                        </Badge>
+                      )}
+                      {t.max_passes && t.max_passes > 1 && (
+                        <Badge variant="outline" className="text-[10px] py-0 px-1 bg-purple-900/30 text-purple-400 border-purple-700/60 shrink-0">
+                          {t.max_passes}x
+                        </Badge>
+                      )}
+                      {t.requires_approval && (
+                        <Badge variant="outline" className="text-[10px] py-0 px-1 bg-rose-900/30 text-rose-400 border-rose-700/60 shrink-0">
+                          appr
+                        </Badge>
+                      )}
                     </div>
-                    <p className="text-xs text-slate-400 mt-0.5 line-clamp-2">{t.description}</p>
+                    <p className="text-[10px] text-slate-500 mt-0.5 line-clamp-2">{t.description}</p>
                   </div>
                   <button
                     onClick={() => removeTask(t.name)}
                     className="text-slate-600 hover:text-red-400 transition-colors opacity-0 group-hover:opacity-100 shrink-0 mt-0.5"
                   >
-                    <Trash2 className="w-3.5 h-3.5" />
+                    <Trash2 className="w-3 h-3" />
                   </button>
                 </div>
               ))}
             </div>
           )}
 
-          {/* Edges */}
+          {/* ── Edges ── */}
           {tasks.length >= 2 && (
             <Card className="bg-slate-800/60 border-slate-700/60">
               <CardHeader className="py-2 px-3">
@@ -245,13 +520,12 @@ export default function WorkflowBuilder({ registeredAgents }: Props) {
               <CardContent className="px-3 pb-3 space-y-2">
                 <div className="flex items-end gap-2">
                   <div className="flex-1 space-y-1 min-w-0">
-                    <Label className="text-[10px] text-slate-500">From</Label>
                     <Select value={edgeFrom || '_none'} onValueChange={v => setEdgeFrom(v === '_none' ? '' : v)}>
                       <SelectTrigger className="bg-slate-900 border-slate-700 text-slate-200 text-xs h-8">
-                        <SelectValue placeholder="From task" />
+                        <SelectValue placeholder="From" />
                       </SelectTrigger>
                       <SelectContent className="bg-slate-800 border-slate-700 text-slate-200">
-                        <SelectItem value="_none">-- Select --</SelectItem>
+                        <SelectItem value="_none">From</SelectItem>
                         {tasks.map(t => (
                           <SelectItem key={t.name} value={t.name}>{t.name}</SelectItem>
                         ))}
@@ -260,13 +534,12 @@ export default function WorkflowBuilder({ registeredAgents }: Props) {
                   </div>
                   <span className="text-slate-600 mb-1.5 shrink-0">→</span>
                   <div className="flex-1 space-y-1 min-w-0">
-                    <Label className="text-[10px] text-slate-500">To</Label>
                     <Select value={edgeTo || '_none'} onValueChange={v => setEdgeTo(v === '_none' ? '' : v)}>
                       <SelectTrigger className="bg-slate-900 border-slate-700 text-slate-200 text-xs h-8">
-                        <SelectValue placeholder="To task" />
+                        <SelectValue placeholder="To" />
                       </SelectTrigger>
                       <SelectContent className="bg-slate-800 border-slate-700 text-slate-200">
-                        <SelectItem value="_none">-- Select --</SelectItem>
+                        <SelectItem value="_none">To</SelectItem>
                         {tasks.map(t => (
                           <SelectItem key={t.name} value={t.name}>{t.name}</SelectItem>
                         ))}
@@ -275,7 +548,7 @@ export default function WorkflowBuilder({ registeredAgents }: Props) {
                   </div>
                   <Button
                     size="sm"
-                    className="bg-slate-700 hover:bg-slate-600 text-white h-8 text-xs shrink-0 transition-colors"
+                    className="bg-slate-700 hover:bg-slate-600 text-white h-8 text-xs shrink-0 transition-colors px-2"
                     onClick={addEdge}
                     disabled={!edgeFrom || !edgeTo}
                   >
@@ -306,27 +579,17 @@ export default function WorkflowBuilder({ registeredAgents }: Props) {
             </Card>
           )}
 
-          {/* DAG Preview */}
-          {tasks.length > 0 && (
-            <WorkflowDAG
-              execution={null}
-              preview
-              previewTasks={tasks.map(t => ({ name: t.name, agent_id: t.agent_id || '', requires_approval: t.requires_approval }))}
-              previewEdges={edges}
-            />
-          )}
-
           {error && (
             <p className="text-xs text-red-400 bg-red-900/20 border border-red-700/30 rounded p-2">{error}</p>
           )}
 
-          {/* Save Button */}
+          {/* ── Define Button ── */}
           <Button
             className="w-full bg-emerald-700 hover:bg-emerald-600 text-white h-9 transition-colors"
             onClick={handleSave}
             disabled={saving || tasks.length === 0}
           >
-            <Save className="w-4 h-4 mr-1.5" />
+            <GitBranch className="w-4 h-4 mr-1.5" />
             {saving ? 'Saving...' : 'Define Workflow'}
           </Button>
         </div>

@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import copy
 import json
+import os
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -335,4 +336,119 @@ class Conversation:
                     lines.append(f"[ToolCall] {tc.function}({tc.arguments})")
         return "\n".join(lines)
 
+    # ── Conversation Compression (Register-Memory Model) ─────────
+
+    def archive_round(
+        self,
+        pass_num: int,
+        out_dir: str,
+    ) -> str:
+        """将当前完整对话保存为 JSON 归档文件。
+
+        归档文件供前端读取以显示历史轮次的完整消息。
+        当前 conversation（寄存器）随后可通过 compact() 压缩。
+
+        Args:
+            pass_num: 当前轮次编号（0=原始, 1=第一次返工, ...）
+            out_dir: 归档目录（通常是 logs/）
+
+        Returns:
+            归档文件绝对路径
+        """
+        os.makedirs(out_dir, exist_ok=True)
+        filepath = os.path.join(out_dir, f"round_{pass_num}_conversation.json")
+        with open(filepath, "w", encoding="utf-8") as f:
+            json.dump(
+                {
+                    "session_id": self.session_id,
+                    "pass_num": pass_num,
+                    "timestamp": time.time(),
+                    "message_count": len(self._messages),
+                    "step_count": len(self._steps),
+                    "messages": [m.to_dict() for m in self._messages],
+                    "steps": [s.to_dict() for s in self._steps],
+                },
+                f,
+                ensure_ascii=False,
+                indent=2,
+            )
+        return filepath
+
+    def compact(self, keep_recent: int = 10) -> None:
+        """压缩 conversation：保留 system + 最近 N 条，中间替换为 [History Archive]。
+
+        遵循 Register-Memory 原则：不重复 IMPLEMENTATION_SUMMARY.md 中已有的
+        结构化信息（文件列表、checklist），只提取叙事性内容（reviewer feedback）。
+
+        Args:
+            keep_recent: 保留的最近消息数量（默认 10 条）
+        """
+        if self.message_count <= keep_recent + 1:
+            return  # 消息太少，无需压缩
+
+        # system prompt 的位置（通常在第 0 条）
+        system_end = 0
+        if self._messages and self._messages[0].role == "system":
+            system_end = 1
+
+        # 计算截断点：保留 system + 最近 keep_recent 条
+        cutoff = max(system_end, self.message_count - keep_recent)
+        if cutoff <= system_end:
+            return  # 没有可压缩的中间消息
+
+        # ── 关键修复：截断点不能落在 tool 消息上 ──
+        # API 要求每条 tool 消息必须有前置的 assistant + tool_calls
+        # 如果截断点落在 tool 上，保留段将以孤立的 tool 开头 → 400
+        while cutoff > system_end and self._messages[cutoff].role == "tool":
+            cutoff -= 1
+
+        # ── 提取旧消息中的 reviewer feedback 要点 ──
+        feedback_snippets: list[str] = []
+        for msg in self._messages[system_end:cutoff]:
+            if msg.role == "user" and msg.content and "[REWORK REQUIRED" in msg.content:
+                content = msg.content
+                fb_start = content.find("Feedback:\n")
+                if fb_start >= 0:
+                    fb_text = content[fb_start + len("Feedback:\n"):]
+                    fb_end = fb_text.find("\n\nFiles currently")
+                    if fb_end >= 0:
+                        fb_text = fb_text[:fb_end]
+                    fb_text = fb_text.strip()
+                    if len(fb_text) > 200:
+                        fb_text = fb_text[:200] + "..."
+                    if fb_text:
+                        feedback_snippets.append(fb_text)
+
+        # ── 构建 [History Archive] 引用消息 ──
+        archive_lines = ["[History Archive]"]
+        archive_lines.append("")
+        archive_lines.append(
+            "Previous conversation rounds archived in this directory."
+        )
+        archive_lines.append(
+            "For full implementation details, read IMPLEMENTATION_SUMMARY.md."
+        )
+
+        if feedback_snippets:
+            archive_lines.append("")
+            archive_lines.append("Key reviewer feedback from prior rounds:")
+            for i, fb in enumerate(feedback_snippets, 1):
+                archive_lines.append(f"  {i}. {fb}")
+
+        archive_content = "\n".join(archive_lines)
+
+        # ── 替换消息列表 ──
+        preserved: list[Message] = []
+        preserved.extend(self._messages[:system_end])  # system prompt
+        preserved.append(Message(role="system", content=archive_content))
+        preserved.extend(self._messages[cutoff:])  # 最近 keep_recent 条
+
+        removed_count = self.message_count - len(preserved)
+        self._messages = preserved
+        self._notify("compacted", {
+            "session_id": self.session_id,
+            "kept": len(preserved),
+            "removed": removed_count,
+            "keep_recent": keep_recent,
+        })
 

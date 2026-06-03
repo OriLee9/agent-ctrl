@@ -214,6 +214,12 @@ class DeepSeekLLM(BaseLLM):
                 total_tokens=data["usage"].get("total_tokens", 0),
             )
 
+        # 兜底：某些 API/代理在非流式模式下不返回 usage，按内容长度估算
+        if usage is None:
+            content_str = message_data.get("content", "") or ""
+            est_tokens = max(len(content_str) // 4, 1)
+            usage = Usage(completion_tokens=est_tokens, total_tokens=est_tokens)
+
         return LLMResponse(
             content=message_data.get("content"),
             tool_calls=tool_calls,

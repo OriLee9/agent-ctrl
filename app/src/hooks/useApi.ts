@@ -350,6 +350,7 @@ export interface TaskDef {
   temperature?: number;
   review_gate?: string;
   max_passes?: number;
+  allowed_tools?: string[];
 }
 
 export interface EdgeDef {

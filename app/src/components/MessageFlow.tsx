@@ -1,10 +1,10 @@
-import { useState, useCallback, useMemo } from 'react';
+import { useState, useCallback, useMemo, useRef, useEffect } from 'react';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
 import type { Message } from '@/types';
-import { User, Cpu, Wrench, AlertTriangle, Terminal, Copy, Check, ChevronDown, ChevronUp } from 'lucide-react';
+import { User, Cpu, Wrench, AlertTriangle, Terminal, Copy, Check, ChevronDown, ChevronUp, History } from 'lucide-react';
 
 interface Props {
   messages: Message[];
@@ -159,10 +159,164 @@ function messageKey(msg: Message, index: number): string {
   return `${msg.role}_${index}_${hash}`;
 }
 
-export default function MessageFlow({ messages }: Props) {
-  const endRef = React.useRef<HTMLDivElement>(null);
+// ── Round Grouping ──────────────────────────────────────────
 
-  React.useEffect(() => {
+interface MessageRound {
+  num: number;        // 0 = original, 1+ = rework
+  label: string;
+  messages: Message[];
+  isRework: boolean;
+}
+
+const ROUND_BORDER_COLORS = [
+  '',                                    // 0: original — no special border
+  'border-l-2 border-l-amber-500/60',   // 1
+  'border-l-2 border-l-rose-500/60',    // 2
+  'border-l-2 border-l-cyan-500/60',    // 3
+  'border-l-2 border-l-violet-500/60',  // 4+
+];
+
+const ROUND_HEADER_COLORS = [
+  'bg-slate-800/40 text-slate-400',                    // 0
+  'bg-amber-900/20 text-amber-400 border-amber-700/40', // 1
+  'bg-rose-900/20 text-rose-400 border-rose-700/40',    // 2
+  'bg-cyan-900/20 text-cyan-400 border-cyan-700/40',    // 3
+  'bg-violet-900/20 text-violet-400 border-violet-700/40', // 4+
+];
+
+function groupMessagesByRound(messages: Message[]): MessageRound[] {
+  const rounds: MessageRound[] = [];
+  let current: Message[] = [];
+  let roundNum = 0;
+
+  for (const msg of messages) {
+    if (msg.role === 'user' && msg.content?.includes('[REWORK REQUIRED')) {
+      // Finish previous round
+      if (current.length > 0) {
+        rounds.push({
+          num: roundNum,
+          label: roundNum === 0 ? 'Original' : `Rework #${roundNum}`,
+          messages: current,
+          isRework: roundNum > 0,
+        });
+      }
+      // Start new round with the rework marker message
+      roundNum++;
+      current = [msg];
+    } else {
+      current.push(msg);
+    }
+  }
+
+  // Last round
+  if (current.length > 0) {
+    rounds.push({
+      num: roundNum,
+      label: roundNum === 0 ? 'Original' : `Rework #${roundNum}`,
+      messages: current,
+      isRework: roundNum > 0,
+    });
+  }
+
+  return rounds;
+}
+
+// ── Round Section Component ─────────────────────────────────
+
+function RoundSection({
+  round,
+  isLatest,
+  baseIndex,
+}: {
+  round: MessageRound;
+  isLatest: boolean;
+  baseIndex: number;
+}) {
+  const [expanded, setExpanded] = useState(isLatest);
+  const borderColor = ROUND_BORDER_COLORS[Math.min(round.num, ROUND_BORDER_COLORS.length - 1)];
+  const headerColor = ROUND_HEADER_COLORS[Math.min(round.num, ROUND_HEADER_COLORS.length - 1)];
+
+  return (
+    <div className={cn('rounded-lg overflow-hidden', borderColor)}>
+      {/* Round Header */}
+      <button
+        onClick={() => setExpanded(!expanded)}
+        className={cn(
+          'w-full flex items-center justify-between px-3 py-1.5 text-xs border-b transition-colors',
+          headerColor,
+          expanded ? 'border-opacity-100' : 'border-opacity-40',
+        )}
+      >
+        <div className="flex items-center gap-2">
+          {round.isRework ? <History className="w-3 h-3" /> : null}
+          <span className="font-medium">{round.label}</span>
+          <span className="text-[10px] opacity-60">{round.messages.length} messages</span>
+        </div>
+        {expanded ? (
+          <ChevronUp className="w-3 h-3" />
+        ) : (
+          <ChevronDown className="w-3 h-3" />
+        )}
+      </button>
+
+      {/* Messages */}
+      {expanded && (
+        <div className="space-y-1 p-2">
+          {round.messages.map((msg, i) => (
+            <MessageCard key={messageKey(msg, baseIndex + i)} msg={msg} index={baseIndex + i} />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Message Card Component ──────────────────────────────────
+
+function MessageCard({ msg, index }: { msg: Message; index: number }) {
+  return (
+    <div
+      className={cn(
+        "flex gap-2.5 p-2.5 rounded-lg transition-colors",
+        msg.role === 'system' && 'bg-purple-900/15',
+        msg.role === 'user' && 'bg-blue-900/10',
+        msg.role === 'assistant' && 'bg-emerald-900/10',
+        msg.role === 'tool' && 'bg-amber-900/10',
+      )}
+    >
+      <div className="mt-0.5 shrink-0">
+        <RoleIcon role={msg.role} />
+      </div>
+      <div className="min-w-0 flex-1">
+        <div className="flex items-center gap-2 mb-1">
+          <RoleBadge role={msg.role} />
+          {msg.name && (
+            <span className="text-xs text-slate-500 truncate">{msg.name}</span>
+          )}
+        </div>
+        {msg.content && <MessageContent content={msg.content} />}
+        {msg.tool_calls && msg.tool_calls.length > 0 && (
+          <div className="mt-1.5 space-y-1">
+            {msg.tool_calls.map((tc) => (
+              <div key={tc.id} className="bg-slate-800/60 rounded px-2 py-1.5 text-xs font-mono border border-slate-700/50 overflow-x-auto">
+                <span className="text-cyan-400">{tc.function.name}</span>
+                <span className="text-slate-600 mx-1">(</span>
+                <span className="text-slate-300">{tc.function.arguments}</span>
+                <span className="text-slate-600">)</span>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+export default function MessageFlow({ messages }: Props) {
+  const endRef = useRef<HTMLDivElement>(null);
+  const rounds = useMemo(() => groupMessagesByRound(messages), [messages]);
+
+  useEffect(() => {
     endRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages.length]);
 
@@ -176,44 +330,19 @@ export default function MessageFlow({ messages }: Props) {
 
   return (
     <ScrollArea className="h-full">
-      <div className="space-y-1.5 p-3">
-        {messages.map((msg, i) => (
-          <div
-            key={messageKey(msg, i)}
-            className={cn(
-              "flex gap-2.5 p-2.5 rounded-lg transition-colors",
-              msg.role === 'system' && 'bg-purple-900/15',
-              msg.role === 'user' && 'bg-blue-900/10',
-              msg.role === 'assistant' && 'bg-emerald-900/10',
-              msg.role === 'tool' && 'bg-amber-900/10',
-            )}
-          >
-            <div className="mt-0.5 shrink-0">
-              <RoleIcon role={msg.role} />
-            </div>
-            <div className="min-w-0 flex-1">
-              <div className="flex items-center gap-2 mb-1">
-                <RoleBadge role={msg.role} />
-                {msg.name && (
-                  <span className="text-xs text-slate-500 truncate">{msg.name}</span>
-                )}
-              </div>
-              {msg.content && <MessageContent content={msg.content} />}
-              {msg.tool_calls && msg.tool_calls.length > 0 && (
-                <div className="mt-1.5 space-y-1">
-                  {msg.tool_calls.map((tc) => (
-                    <div key={tc.id} className="bg-slate-800/60 rounded px-2 py-1.5 text-xs font-mono border border-slate-700/50 overflow-x-auto">
-                      <span className="text-cyan-400">{tc.function.name}</span>
-                      <span className="text-slate-600 mx-1">(</span>
-                      <span className="text-slate-300">{tc.function.arguments}</span>
-                      <span className="text-slate-600">)</span>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
-          </div>
-        ))}
+      <div className="space-y-2 p-3">
+        {rounds.map((round, roundIdx) => {
+          // Calculate base index for stable keys
+          const baseIndex = rounds.slice(0, roundIdx).reduce((sum, r) => sum + r.messages.length, 0);
+          return (
+            <RoundSection
+              key={`round_${round.num}`}
+              round={round}
+              isLatest={roundIdx === rounds.length - 1}
+              baseIndex={baseIndex}
+            />
+          );
+        })}
         <div ref={endRef} />
       </div>
     </ScrollArea>

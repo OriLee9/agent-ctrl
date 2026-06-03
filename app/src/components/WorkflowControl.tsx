@@ -14,7 +14,7 @@ import ArtifactsPanel from './ArtifactsPanel';
 import { cn } from '@/lib/utils';
 import { useWorkflowExecution } from '@/hooks/useApi';
 import type { WorkflowExecutionDetail, TaskExecutionState, WorkflowEvent, WorkflowState } from '@/types';
-import { Pause, Play, Square, CheckCircle, XCircle, Clock, Loader2 } from 'lucide-react';
+import { Pause, Play, Square, CheckCircle, XCircle, Clock, Loader2, ChevronDown, ChevronUp } from 'lucide-react';
 
 interface Props {
   progress: {
@@ -28,6 +28,7 @@ interface Props {
   tasks: Array<Record<string, unknown>>;
   taskStates: Record<string, TaskExecutionState>;
   events?: WorkflowEvent[];
+  onRefresh?: () => void;
 }
 
 function formatElapsed(seconds: number): string {
@@ -85,8 +86,9 @@ function StateBadge({ state }: { state: string }) {
   );
 }
 
-export default function WorkflowControl({ progress, tasks, taskStates, events }: Props) {
+export default function WorkflowControl({ progress, tasks, taskStates, events, onRefresh }: Props) {
   const { execution } = useWorkflowExecution(events);
+  const [showDetails, setShowDetails] = React.useState(false);
   const isRunning = progress.state === 'running';
   const isPaused = progress.state === 'paused';
   const needsApproval = progress.state === 'waiting_approval';
@@ -95,8 +97,24 @@ export default function WorkflowControl({ progress, tasks, taskStates, events }:
   const isAborted = progress.state === 'aborted';
   const isFinished = isCompleted || isFailed || isAborted;
 
+  const handlePause = async () => {
+    await workflowPause();
+    onRefresh?.();
+  };
+  const handleResume = async () => {
+    await workflowResume();
+    onRefresh?.();
+  };
+  const handleAbort = async () => {
+    await workflowAbort();
+    onRefresh?.();
+  };
+
   return (
-    <div className="bg-slate-800/50 border-b border-slate-700/80 px-5 py-3 max-h-[45vh] overflow-y-auto">
+    <div className={cn(
+      'bg-slate-800/50 border-b border-slate-700/80 px-5 py-3 overflow-y-auto transition-all',
+      showDetails ? 'max-h-[40vh]' : 'max-h-[200px]'
+    )}>
       {/* Top row: controls + status */}
       <div className="flex items-center justify-between mb-3 gap-3">
         <div className="flex items-center gap-3 min-w-0">
@@ -124,7 +142,7 @@ export default function WorkflowControl({ progress, tasks, taskStates, events }:
                   size="sm"
                   variant="outline"
                   className="border-amber-700/60 text-amber-400 hover:bg-amber-900/25 h-7 text-xs px-2 transition-colors"
-                  onClick={workflowPause}
+                  onClick={handlePause}
                 >
                   <Pause className="w-3.5 h-3.5 mr-1" /> Pause
                 </Button>
@@ -133,7 +151,7 @@ export default function WorkflowControl({ progress, tasks, taskStates, events }:
                   size="sm"
                   variant="outline"
                   className="border-emerald-700/60 text-emerald-400 hover:bg-emerald-900/25 h-7 text-xs px-2 transition-colors"
-                  onClick={workflowResume}
+                  onClick={handleResume}
                   disabled={!isPaused}
                 >
                   <Play className="w-3.5 h-3.5 mr-1" /> Resume
@@ -143,7 +161,7 @@ export default function WorkflowControl({ progress, tasks, taskStates, events }:
                 size="sm"
                 variant="outline"
                 className="border-red-700/60 text-red-400 hover:bg-red-900/25 h-7 text-xs px-2 transition-colors"
-                onClick={workflowAbort}
+                onClick={handleAbort}
               >
                 <Square className="w-3.5 h-3.5 mr-1" /> Abort
               </Button>
@@ -225,15 +243,35 @@ export default function WorkflowControl({ progress, tasks, taskStates, events }:
         </div>
       )}
 
+      {/* Toggle DAG + Artifacts */}
+      {execution && (
+        <button
+          onClick={() => setShowDetails(!showDetails)}
+          className="mt-2 flex items-center gap-1 text-[11px] text-slate-500 hover:text-cyan-400 transition-colors"
+        >
+          {showDetails ? (
+            <>
+              <ChevronUp className="w-3 h-3" /> Collapse DAG &amp; Artifacts
+            </>
+          ) : (
+            <>
+              <ChevronDown className="w-3 h-3" /> Show DAG &amp; Artifacts
+            </>
+          )}
+        </button>
+      )}
+
       {/* DAG + Artifacts side-by-side */}
-      <div className="mt-3 grid grid-cols-1 lg:grid-cols-3 gap-3">
-        <div className="lg:col-span-2">
-          <WorkflowDAG execution={execution} taskStates={taskStates} />
+      {showDetails && execution && (
+        <div className="mt-3 grid grid-cols-1 lg:grid-cols-3 gap-3">
+          <div className="lg:col-span-2">
+            <WorkflowDAG execution={execution} taskStates={taskStates} />
+          </div>
+          <div>
+            <ArtifactsPanel execution={execution} taskStates={taskStates} />
+          </div>
         </div>
-        <div>
-          <ArtifactsPanel execution={execution} taskStates={taskStates} />
-        </div>
-      </div>
+      )}
     </div>
   );
 }

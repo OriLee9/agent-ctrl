@@ -6,6 +6,7 @@ import {
   Bot,
   MessageSquare,
   Footprints,
+  Cpu,
   HardDrive,
   ChevronRight,
   ChevronDown,
@@ -49,6 +50,10 @@ function getTaskStateColor(state?: string): string {
       return 'text-emerald-400';
     case 'completed':
       return 'text-blue-400';
+    case 'approved':
+      return 'text-purple-400';
+    case 'rejected':
+      return 'text-red-400';
     case 'failed':
       return 'text-red-400';
     case 'pending':
@@ -66,6 +71,10 @@ function getTaskStateIcon(state?: string) {
       return <Loader2 className="w-3 h-3 animate-spin text-emerald-400" />;
     case 'completed':
       return <CheckCircle2 className="w-3 h-3 text-blue-400" />;
+    case 'approved':
+      return <CheckCircle2 className="w-3 h-3 text-purple-400" />;
+    case 'rejected':
+      return <XCircle className="w-3 h-3 text-red-400" />;
     case 'failed':
       return <XCircle className="w-3 h-3 text-red-400" />;
     case 'pending':
@@ -83,6 +92,10 @@ function getTaskStateLabel(state?: string): string {
       return 'running';
     case 'completed':
       return 'done';
+    case 'approved':
+      return 'approved';
+    case 'rejected':
+      return 'rejected';
     case 'failed':
       return 'failed';
     case 'pending':
@@ -229,23 +242,32 @@ export default function AgentSidebar({ agents, selectedId, onSelect, taskStates 
                     )}
                   </div>
                   <div className="flex items-center gap-2 text-[10px] text-slate-500 mt-0.5">
-                    {base && (
+                    {hasTasks ? (
+                      <>
+                        <span className="flex items-center gap-0.5">
+                          <MessageSquare className="w-2.5 h-2.5" />
+                          {group.tasks.reduce((sum, t) => sum + (t.message_count || 0), 0)}
+                        </span>
+                        <span className="flex items-center gap-0.5">
+                          <Cpu className="w-2.5 h-2.5" />
+                          {group.tasks.reduce((sum, t) => sum + (t.total_usage?.total_tokens || 0), 0)}
+                        </span>
+                        <span>
+                          {group.tasks.length} task{group.tasks.length > 1 ? 's' : ''}
+                        </span>
+                      </>
+                    ) : base ? (
                       <>
                         <span className="flex items-center gap-0.5">
                           <MessageSquare className="w-2.5 h-2.5" />
                           {base.message_count}
                         </span>
                         <span className="flex items-center gap-0.5">
-                          <Footprints className="w-2.5 h-2.5" />
-                          {base.step_count}
+                          <Cpu className="w-2.5 h-2.5" />
+                          {base.total_usage.total_tokens}
                         </span>
                       </>
-                    )}
-                    {hasTasks && (
-                      <span>
-                        {group.tasks.length} task{group.tasks.length > 1 ? 's' : ''}
-                      </span>
-                    )}
+                    ) : null}
                   </div>
                 </div>
               </button>
@@ -284,9 +306,13 @@ export default function AgentSidebar({ agents, selectedId, onSelect, taskStates 
                                   ? 'bg-emerald-900/40 text-emerald-400'
                                   : state?.toLowerCase() === 'completed'
                                     ? 'bg-blue-900/40 text-blue-400'
-                                    : state?.toLowerCase() === 'failed'
-                                      ? 'bg-red-900/40 text-red-400'
-                                      : 'bg-slate-800 text-slate-500'
+                                    : state?.toLowerCase() === 'approved'
+                                      ? 'bg-purple-900/40 text-purple-400'
+                                      : state?.toLowerCase() === 'rejected'
+                                        ? 'bg-red-900/40 text-red-400'
+                                        : state?.toLowerCase() === 'failed'
+                                          ? 'bg-red-900/40 text-red-400'
+                                          : 'bg-slate-800 text-slate-500'
                               )}
                             >
                               {getTaskStateLabel(state)}
