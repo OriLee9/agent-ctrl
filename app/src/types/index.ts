@@ -111,19 +111,6 @@ export interface TaskExecutionState {
   artifacts: string[];
 }
 
-export interface TaskExecutionDetail {
-  task_name: string;
-  state: TaskState;
-  output: string;
-  agent_id: string;
-  elapsed: number;
-  started_at: number | null;
-  completed_at: number | null;
-  error: string | null;
-  retry_count: number;
-  artifacts: string[];
-}
-
 export type WorkflowState =
   | 'none'
   | 'pending'
@@ -157,11 +144,4 @@ export interface WorkflowExecutionDetail {
   execution_order: string[];
   total_elapsed: number;
   error: string | null;
-}
-
-export interface ArtifactInfo {
-  path: string;
-  name: string;
-  task_name: string;
-  agent_id: string;
 }

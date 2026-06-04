@@ -381,11 +381,6 @@ export async function workflowStart(apiKey?: string) {
   return safeJson(res);
 }
 
-export async function fetchWorkflowDefinition() {
-  const res = await fetch(`${API_BASE}/workflow/definition`);
-  return res.json();
-}
-
 // ── v3.1: Agent 注册 ────────────────────────────────────
 
 export async function agentRegister(config: {
@@ -411,16 +406,6 @@ export async function fetchAgentTemplates() {
 }
 
 // ── v3.1: React hooks ───────────────────────────────────
-
-export function useWorkflowDefinition() {
-  const { data, error, refetch } = usePolling(
-    `${API_BASE}/workflow/definition`,
-    3000,
-    (json) => json as { defined: boolean; workflow: { name: string; workflow_id: string; tasks: Array<{ name: string; description: string; agent_id?: string; requires_approval?: boolean; state?: string }>; edges: EdgeDef[] } | null },
-    { defined: false, workflow: null },
-  );
-  return { definition: data, error, refetch };
-}
 
 export function useAgentTemplates() {
   const [templates, setTemplates] = useState<{

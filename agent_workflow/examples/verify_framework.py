@@ -27,7 +27,7 @@ from orchestration.context_hub import ContextHub, ContextEvent, Intervention
 from orchestration.task import Task
 from orchestration.workflow import Workflow
 from orchestration.rules import SimpleRuleEngine, RuleConfig
-from core.persistence import save_conversation, load_conversation, ConversationStore
+
 
 
 # ── Mock LLM ───────────────────────────────────────────────────
@@ -430,52 +430,6 @@ def test_rule_engine_repeated_short_thoughts():
     print("  PASSED")
 
 
-def test_persistence_save_load():
-    """测试: Conversation保存与加载。"""
-    print("\n[TEST] Persistence Save & Load")
-
-    import tempfile
-    import os
-
-    conv = Conversation(session_id="test_session")
-    conv.add_system("You are a test agent")
-    conv.add_user("Hello")
-    conv.add_assistant("Hi there")
-    conv.record_step(StepRecord(thought="Process greeting"))
-    snap_id = conv.snapshot()
-
-    # 保存
-    with tempfile.NamedTemporaryFile(suffix=".json", delete=False, mode="w") as f:
-        tmp_path = f.name
-
-    try:
-        ConversationStore.save(conv, tmp_path)
-        assert ConversationStore.exists(tmp_path)
-        print(f"  file size: {os.path.getsize(tmp_path)} bytes")
-
-        # 加载
-        loaded = ConversationStore.load(tmp_path)
-        assert loaded.session_id == "test_session"
-        assert loaded.message_count == 3  # system + user + assistant
-        assert loaded.step_count == 1
-        assert len(loaded._snapshots) == 1
-
-        # 验证消息内容
-        msgs = loaded.get_messages()
-        assert msgs[0].role == "system"
-        assert msgs[1].role == "user"
-        assert msgs[1].content == "Hello"
-        assert msgs[2].role == "assistant"
-
-        print(f"  session_id: {loaded.session_id}")
-        print(f"  messages: {loaded.message_count}")
-        print(f"  steps: {loaded.step_count}")
-        print(f"  snapshots: {len(loaded._snapshots)}")
-        print("  PASSED")
-    finally:
-        os.unlink(tmp_path)
-
-
 TESTS = [
     test_tool_schema,
     test_tool_execution,
@@ -489,7 +443,6 @@ TESTS = [
     test_workflow_dag,
     test_workflow_mermaid,
     test_rule_engine_repeated_short_thoughts,
-    test_persistence_save_load,
 ]
 
 

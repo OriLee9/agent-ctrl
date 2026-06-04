@@ -17,13 +17,6 @@ from orchestration.workflow.engine import (
     WorkflowEngine,
     WorkflowResult,
 )
-from orchestration.workflow.presets import (
-    conditional_workflow,
-    mapreduce_workflow,
-    parallel_workflow,
-    run_chain,
-    sequential_workflow,
-)
 
 # 向后兼容别名
 Workflow = WorkflowEngine
@@ -43,10 +36,4 @@ __all__ = [
     "TaskResult",
     "WorkflowResult",
     "ArtifactCollector",
-    # 预设
-    "sequential_workflow",
-    "parallel_workflow",
-    "mapreduce_workflow",
-    "conditional_workflow",
-    "run_chain",
 ]

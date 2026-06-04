@@ -57,7 +57,6 @@ from core.review_tools import (
     reviewer_system_prompt,
     set_review_decision,
 )
-from core.sub_agent import SubAgentManager
 from orchestration.context_hub import ContextHub
 from orchestration.task import Task
 from orchestration.workflow.checkpoint import WorkflowCheckpoint
@@ -68,19 +67,6 @@ from orchestration.workflow.state import (
     WorkflowState,
 )
 from validation.validators import HtmlValidator, JavaScriptValidator
-
-
-# Optional validation/report integration
-try:
-    from utils.report import ReportGenerator
-except Exception:
-    ReportGenerator = None  # type: ignore[misc,assignment]
-
-try:
-    from validation import ValidationRunner
-    from validation.validators import FileExistsValidator, JsonValidator, PythonSyntaxValidator
-except Exception:
-    ValidationRunner = None  # type: ignore[misc,assignment]
 
 
 # ── 产物收集器（替代硬编码路径扫描）─────────────────────────
@@ -886,97 +872,12 @@ class WorkflowEngine:
                     artifacts=ex.artifacts,
                 )
 
-            # ── Validation & Report Generation (P1) ─────────────
-            self._generate_report_and_validate(execution, result)
-
             if self.on_state_change:
                 self.on_state_change(execution.state)
             if self.on_complete:
                 self.on_complete(execution)
 
         return result
-
-    def _generate_report_and_validate(
-        self,
-        execution: WorkflowExecution,
-        result: WorkflowResult,
-    ) -> None:
-        """Generate execution report and run artifact validation."""
-        if ReportGenerator is None:
-            return
-
-        # Collect artifact paths from all task executions
-        artifact_paths: list[str] = []
-        for te in execution.task_executions.values():
-            if te.artifacts:
-                for art in te.artifacts:
-                    # Artifacts may be relative to outputs dir
-                    full = art
-                    if not os.path.isabs(art):
-                        # Try to resolve against common output locations
-                        for base in [
-                            os.environ.get(
-                                "AGENT_OUTPUTS_DIR",
-                                os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "outputs"),
-                            ),
-                            os.environ.get("ARTIFACTS_DIR", "/tmp/agent_workflow/artifacts"),
-                            ".",
-                        ]:
-                            candidate = os.path.join(base, art)
-                            if os.path.exists(candidate):
-                                full = candidate
-                                break
-                    if os.path.exists(full):
-                        artifact_paths.append(full)
-
-        # Deduplicate while preserving order
-        seen = set()
-        artifact_paths = [p for p in artifact_paths if not (p in seen or seen.add(p))]
-
-        # Run validation
-        validation_summary: dict | None = None
-        if ValidationRunner is not None and artifact_paths:
-            runner = ValidationRunner()
-            runner.add_validator(FileExistsValidator())
-            runner.add_validator(PythonSyntaxValidator())
-            runner.add_validator(JsonValidator())
-            summary = runner.run_all(artifacts=artifact_paths)
-            validation_summary = summary.to_dict()
-
-            # If validation fails, mark workflow as having validation errors
-            # but don't change the overall state (execution already completed or failed)
-            if not summary.success:
-                result.error = (
-                    f"{result.error or ''}\n"
-                    f"[VALIDATION] {summary.failed}/{summary.total} validation checks failed."
-                ).strip()
-
-        # Generate report
-        try:
-            gen = ReportGenerator()
-            gen.generate_report(
-                workflow_name=self.name,
-                workflow_id=self.workflow_id,
-                task_results={
-                    name: {
-                        "success": tr.success,
-                        "output": tr.output,
-                        "elapsed": tr.elapsed,
-                        "error": tr.error,
-                        "artifacts": tr.artifacts,
-                    }
-                    for name, tr in result.task_results.items()
-                },
-                started_at=execution.started_at,
-                completed_at=execution.completed_at,
-                total_elapsed=result.total_elapsed,
-                success=result.success,
-                artifact_paths=artifact_paths,
-                validation_summary=validation_summary,
-                error=result.error,
-            )
-        except Exception:
-            pass
 
     async def _execute_task_async(
         self,
@@ -1383,11 +1284,15 @@ class WorkflowEngine:
                     conv.add_tool_result(msg.tool_call_id, msg.name or "", msg.content or "")
 
     def _setup_sub_agent(self, agent: Agent) -> None:
-        """为 Agent 设置 spawn_sub_agent 工具（带缓存，避免重复实例化）。"""
+        """为 Agent 设置 spawn_sub_agent 工具（按需导入，避免强依赖）。"""
         if not self._hub:
             return
         if any(t.name == "spawn_sub_agent" for t in agent._tools.values()):
             return
+        try:
+            from core.sub_agent import SubAgentManager
+        except Exception:
+            return  # sub_agent 模块未安装或不可用
         agent_id = id(agent)
         if agent_id not in self._sub_agent_managers:
             self._sub_agent_managers[agent_id] = SubAgentManager(agent, self._hub)

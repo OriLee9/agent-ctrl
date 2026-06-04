@@ -1,24 +1,14 @@
-"""Artifact validation layer — ensure workflow outputs meet quality standards.
+"""Artifact validation layer — HTML/JS validators for workflow engine.
 
-Usage:
-    from validation import ValidationRunner, ValidationResult
-    runner = ValidationRunner()
-    runner.add_validator(PythonSyntaxValidator())
-    results = runner.run_all(artifacts=["src/main.py", "config.json"])
+Only HtmlValidator and JavaScriptValidator remain;
+ValidationRunner and other validators were removed in the slimming pass.
 """
 from __future__ import annotations
 
-from validation.runner import ValidationResult, ValidationRunner
-from validation.validators import (
-    FileExistsValidator,
-    JsonValidator,
-    PythonSyntaxValidator,
-)
+from validation.validators import HtmlValidator, JavaScriptValidator, ValidationResult
 
 __all__ = [
-    "ValidationRunner",
+    "HtmlValidator",
+    "JavaScriptValidator",
     "ValidationResult",
-    "PythonSyntaxValidator",
-    "JsonValidator",
-    "FileExistsValidator",
 ]
