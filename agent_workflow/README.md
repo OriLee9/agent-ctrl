@@ -213,6 +213,56 @@ def write_file(path: str, content: str, overwrite: bool = False) -> str:
 # 自动生成 JSON Schema，LLM 可直接调用
 ```
 
+### Skill — 可复用能力包
+
+将 system_prompt + tools 打包为可复用的 Skill，不同 Agent 加载不同能力：
+
+```python
+from core.skill import Skill, SkillRegistry
+
+registry = SkillRegistry()
+
+# 注册设计能力
+registry.register(Skill(
+    name="design",
+    description="Design document generation",
+    system_prompt="You are an architecture designer...",
+    tools=[search_code, read_file_range],
+))
+
+# 注册编码能力
+registry.register(Skill(
+    name="coding",
+    description="Code generation",
+    system_prompt="You are an expert programmer...",
+    tools=[write_file, search_code],
+    parameters={"language": "python"},
+))
+
+# 应用到 Agent
+agent = Agent(llm=llm)
+registry.apply_to_agent("coding", agent, language="Rust")
+
+# 组合多个 Skill
+combined = registry.combine(["research", "coding"])
+```
+
+### 本地工具执行 — run_command
+
+Agent 可直接调用本地 shell 命令（仿真工具、构建脚本、测试等）：
+
+```python
+# Agent ReAct 中自动调用：
+run_command("python simulate.py --config cfg.json", timeout=60)
+run_command("make build", cwd="./project")
+
+# 通过 FileTools 注册：
+from core.file_tools import FileTools
+ft = FileTools("./project")
+for tool in ft.get_tools():  # 包含 run_command
+    agent.register_tool(tool)
+```
+
 ### WorkflowEngine — 工作流编排
 
 ```python
@@ -257,6 +307,27 @@ wf.add_task("review", Node(
 ```
 
 评审 Agent 使用 `review_decision(approved=True/False, feedback=...)` 工具提交 verdict。
+
+### Loop Condition — 条件循环
+
+DAG 节点支持 **循环执行直到条件满足**，用于需要迭代的场景（仿真 → 分析 → 调整，直到指标通过）：
+
+```python
+wf.add_task("simulate", Node(
+    Task("simulate", "Run simulation with positive/negative cases"),
+    "executor",
+    loop_condition=lambda outputs: outputs.get("pass_rate", 0) >= 0.8,
+    loop_max_iterations=5,
+))
+```
+
+执行流程：
+- DAG 全部完成后，检查 `loop_condition(outputs)`
+- 返回 `True` → 继续下一任务
+- 返回 `False` → 注入反馈 → 重新执行该 task → 再检查
+- 耗尽 `loop_max_iterations` 仍未满足 → workflow FAILED
+
+支持 Register-Memory 压缩，多轮迭代不膨胀上下文。
 
 ### Register-Memory 对话压缩
 
@@ -338,7 +409,7 @@ ft = FileTools("./project")
 for tool in ft.get_tools():
     agent.register_tool(tool)
 # Agent 获得 search_code / read_file_range / list_files / file_summary /
-#       search_with_context / write_file / make_dir 能力
+#       search_with_context / write_file / make_dir / run_command 能力
 ```
 
 ---
@@ -467,10 +538,19 @@ python examples/test_deepseek.py
 6. **三层递进文件管理** — grep 检索 → offset/limit 分段 → LRU 缓存
 7. **Register-Memory 模型** — 对话是寄存器（小），文件是内存（大），永不重复存储
 8. **Review Gate 闭环** — 评审→反馈→返工→再评审，直到通过或耗尽次数
+9. **Skill 扩展** — Prompt + Tools 打包为可复用能力包，Agent 按需加载
+10. **本地工具执行** — Agent 可直接调用 shell 命令，打通仿真/构建/测试等本地环境
 
 ---
 
 ## 版本历史
+
+### v3.1.0 (2026-06-04)
+
+- **Skill 系统** — 恢复 `core/skill.py`，支持 Skill/SkillRegistry：注册、组合、参数化渲染、应用到 Agent
+- **本地工具执行** — `run_command` 工具（`FileTools`），Agent 可直接调用 shell 命令运行仿真/构建/测试
+- **条件循环工作流** — `Node(loop_condition=..., loop_max_iterations=...)`，DAG 完成后循环执行直到条件满足
+- **代码瘦身** — 删除 9,500+ 行未使用代码（persistence、skill stub、report、logging_config、presets 等）
 
 ### v3.0.0 (2026-06-03)
 
