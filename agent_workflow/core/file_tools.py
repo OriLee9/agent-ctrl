@@ -7,6 +7,7 @@ FileContextManager 的工具注册 — 为 Agent ReAct 循环提供文件操作�
 3. list_files      — 列出目录结构
 4. file_summary    — 生成文件摘要
 5. search_with_context — 搜索+自动读取上下文
+6. run_command     — 执行本地 shell 命令
 
 使用方式:
     from core.file_tools import FileTools
@@ -17,8 +18,12 @@ FileContextManager 的工具注册 — 为 Agent ReAct 循环提供文件操作�
     # Agent ReAct 中:
     # > search_code(pattern="def foo", path="src")
     # > read_file_range(path="src/x.py", offset=234, limit=20)
+    # > run_command("python simulate.py --config cfg.json", timeout=60)
 """
 from __future__ import annotations
+
+import shlex
+import subprocess
 
 from core.file_context import FileContextManager
 from core.tool import tool
@@ -44,6 +49,7 @@ class FileTools:
             self._search_with_context_tool(),
             self._write_file_tool(),
             self._make_dir_tool(),
+            self._run_command_tool(),
         ]
 
     def _write_file_tool(self):
@@ -314,3 +320,55 @@ class FileTools:
             return "\n".join(parts)
 
         return search_with_context
+
+    def _run_command_tool(self):
+        @tool
+        def run_command(command: str, timeout: int = 30, cwd: str = "") -> str:
+            """
+            Execute a local shell command and return its output.
+
+            Use this to run simulation tools, build scripts, tests, or any external
+            program. The command runs in a subprocess with captured stdout/stderr.
+
+            Args:
+                command: The command to execute (e.g. "python simulate.py --config cfg.json").
+                         Spaces will be split via shlex; quote arguments containing spaces.
+                timeout: Maximum seconds to wait (1-300, default: 30).
+                cwd: Working directory for the command (default: current directory).
+
+            Returns:
+                Command stdout output, or an error message if the command fails.
+
+            Examples:
+                run_command("python run_simulation.py --config config.json")
+                run_command("make build", cwd="./project", timeout=60)
+                run_command("pytest tests/", timeout=120)
+            """
+            timeout = min(max(timeout, 1), 300)
+            kwargs = {"capture_output": True, "text": True, "timeout": timeout}
+            if cwd:
+                kwargs["cwd"] = cwd
+
+            try:
+                # Prefer shlex.split for proper quoting; fall back to shell if parsing fails
+                try:
+                    cmd_parts = shlex.split(command)
+                except ValueError:
+                    cmd_parts = command
+                result = subprocess.run(cmd_parts, **kwargs)
+                output = result.stdout.strip()
+                if result.returncode != 0:
+                    err = result.stderr.strip() or "(no stderr)"
+                    return (
+                        f"[ERROR] Exit code {result.returncode}: {err[:500]}\n"
+                        f"Stdout: {output[:500]}"
+                    )
+                return output or "(command completed with no output)"
+            except subprocess.TimeoutExpired:
+                return f"[ERROR] Command timed out after {timeout}s"
+            except FileNotFoundError as e:
+                return f"[ERROR] Command not found: {e}"
+            except Exception as e:
+                return f"[ERROR] {type(e).__name__}: {e}"
+
+        return run_command

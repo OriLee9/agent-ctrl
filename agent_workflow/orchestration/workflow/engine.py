@@ -127,6 +127,9 @@ class Node:
     # 审查门控：若 review 输出含 CRITICAL，自动重跑（0=不重跑）
     max_passes: int = 1
     review_gate: str | None = None  # 哪个 task 的输出作为审查标准
+    # 循环条件：DAG 完成后若条件不满足则重复执行该 task
+    loop_condition: Callable[[dict[str, Any]], bool] | None = None  # 返回 True=停止循环
+    loop_max_iterations: int = 1  # 默认 1 = 不循环
 
 
 @dataclass
@@ -604,6 +607,117 @@ class WorkflowEngine:
                         with self._lock:
                             self._transition_state(WorkflowState.FAILED, execution)
                         break
+
+            # ── 循环条件检查与重复执行 ──────────────────────────────
+            # DAG 执行完毕后，检查带有 loop_condition 的节点
+            if execution.state not in (
+                WorkflowState.ABORTED,
+                WorkflowState.FAILED,
+                WorkflowState.WAITING_RECOVERY,
+            ):
+                for node_name, node in self._nodes.items():
+                    if node.loop_condition is None or node.loop_max_iterations <= 1:
+                        continue
+                    task_exec = execution.task_executions.get(node.task.name)
+                    if not task_exec or task_exec.state != TaskState.COMPLETED:
+                        continue
+
+                    loop_iteration = 1
+                    while loop_iteration < node.loop_max_iterations:
+                        if node.loop_condition(task_outputs):
+                            break
+
+                        # 条件不满足，准备重新执行
+                        feedback = (
+                            f"[LOOP ITERATION {loop_iteration + 1}"
+                            f"/{node.loop_max_iterations}]\n\n"
+                            f"The loop condition for task '{node.task.name}' "
+                            f"was not satisfied. Previous output:\n\n"
+                            f"{task_exec.output[:1500] if task_exec.output else '(no output)'}"
+                            f"\n\nPlease adjust your approach to satisfy the condition."
+                        )
+
+                        # 向 conversation 注入 feedback（如果 hub 中存在）
+                        if self._hub:
+                            conv_id = f"{node.agent_id}/{node.task.name}"
+                            conv = self._hub.get_conversation(conv_id)
+                            if conv:
+                                conv.add_user(feedback)
+                                # Register-Memory 压缩
+                                try:
+                                    logs_dir = os.path.join(
+                                        os.environ.get(
+                                            "AGENT_OUTPUTS_DIR",
+                                            os.path.join(
+                                                os.path.dirname(
+                                                    os.path.dirname(
+                                                        os.path.dirname(__file__)
+                                                    )
+                                                ),
+                                                "outputs",
+                                            ),
+                                        ),
+                                        self.name,
+                                        "logs",
+                                    )
+                                    os.makedirs(logs_dir, exist_ok=True)
+                                    conv.archive_round(
+                                        pass_num=loop_iteration,
+                                        out_dir=logs_dir,
+                                    )
+                                    conv.compact(keep_recent=10)
+                                except Exception:
+                                    pass
+
+                        # 重新执行 task
+                        new_retry_count = task_exec.retry_count + 1
+                        ex = await self._execute_task_async(
+                            node.task.name, node, task_outputs, executor
+                        )
+                        if isinstance(ex, Exception):
+                            execution.task_executions[node.task.name] = (
+                                TaskExecution(
+                                    task_name=node.task.name,
+                                    state=TaskState.FAILED,
+                                    error=str(ex),
+                                )
+                            )
+                            execution.task_executions[
+                                node.task.name
+                            ].retry_count = new_retry_count
+                            execution.error = (
+                                f"Task '{node.task.name}' failed during "
+                                f"loop iteration {loop_iteration + 1}: {ex}"
+                            )
+                            with self._lock:
+                                self._transition_state(
+                                    WorkflowState.FAILED, execution
+                                )
+                            break
+
+                        execution.task_executions[node.task.name] = ex
+                        if ex.state == TaskState.COMPLETED:
+                            task_outputs[node.task.name] = ex.output
+                            task_outputs[f"{node.task.name}_output"] = ex.output
+                        execution.task_executions[
+                            node.task.name
+                        ].retry_count = new_retry_count
+                        task_exec = ex
+                        loop_iteration += 1
+                    else:
+                        # while 未 break → 所有迭代都失败了
+                        if execution.state != WorkflowState.FAILED:
+                            if not node.loop_condition(task_outputs):
+                                execution.error = (
+                                    f"Task '{node.task.name}' loop condition "
+                                    f"not met after {node.loop_max_iterations} "
+                                    f"iterations"
+                                )
+                                with self._lock:
+                                    self._transition_state(
+                                        WorkflowState.FAILED, execution
+                                    )
+                                break
 
             # ── 全局 review_gate 检查与返工循环 ──────────────────────
             # 所有 DAG 层执行完毕后，检查 review-implement 循环

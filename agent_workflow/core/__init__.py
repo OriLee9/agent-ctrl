@@ -1,10 +1,11 @@
 """
-Core layer — 4 essential abstractions for any agent system.
+Core layer — 5 essential abstractions for any agent system.
 
 - LLM: Model interface
 - Tool: External capability wrapper
 - Memory: Context storage & snapshots
 - Agent: ReAct reasoning loop
+- Skill: Reusable capability packs (prompt + tools)
 """
 
 from core.agent import Agent, AgentConfig, AgentResult
@@ -20,6 +21,7 @@ from core.llm import (
     resolve_deepseek_model,
 )
 from core.memory import Conversation, Snapshot, StepRecord
+from core.skill import Skill, SkillRegistry, builtin_skills
 from core.tool import Tool, ToolResult, done, think, tool
 
 __all__ = [
@@ -47,4 +49,8 @@ __all__ = [
     "Agent",
     "AgentConfig",
     "AgentResult",
+    # Skill
+    "Skill",
+    "SkillRegistry",
+    "builtin_skills",
 ]
